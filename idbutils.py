@@ -1,3 +1,14 @@
+"""
+idbutils - a module for reading hex-rays Interactive DisAssembler databases
+
+Supports database versions starting with IDA v2.0 
+
+IDA v1.x  is not supported, that was an entirely different file format.
+IDA v2.x  databases are organised as several files, in a directory
+IDA v3.x  databases are bundled into .idb files
+
+
+"""
 from __future__ import division, print_function, absolute_import, unicode_literals
 import struct
 import binascii
@@ -7,6 +18,10 @@ try:
 except:
     def cmp(a,b): return (a>b)-(a<b)
 
+def nonefmt(fmt, item):
+    if item is None:
+        return "-"
+    return fmt % item
 
 class FileSection(object):
     """
@@ -181,6 +196,34 @@ class IDBFile(object):
     def getsection(self, cls):
         return cls(self, self.getpart(cls.INDEX))
 
+class RecoverIDBFile:
+    id2ext = [ 'id0', 'id1', 'nam', 'seg', 'til', 'id2' ]
+    def __init__(self, args, basepath, dbfiles):
+        if args.i64:
+            self.magic = 'IDA2'
+        else:
+            self.magic = 'IDA1'
+        self.basepath = basepath
+        self.dbfiles = dbfiles
+
+    def getsectioninfo(self, i):
+        if not 0<=i<len(self.id2ext):
+            return 0, 0, 0
+        ext = self.id2ext[i]
+        if ext not in self.dbfiles:
+            return 0, 0, 0
+        return 0, 0, os.path.getsize(self.dbfiles[ext])
+
+    def getpart(self, ix):
+        if not 0<=ix<len(self.id2ext):
+            return None
+        ext = self.id2ext[ix]
+        if ext not in self.dbfiles:
+            return NOne
+        return open(self.dbfiles[ext], "rb")
+
+    def getsection(self, cls):
+        return cls(self, self.getpart(cls.INDEX))
 
 # v1..v5  id1 and nam files start with 'Va4'
 # v6      id1 and nam files start with 'VA*'
@@ -269,7 +312,7 @@ class BaseLeafEntry(BaseIndexEntry):
         super(BaseLeafEntry, self).__init__(data)
         self.key = key[:self.indent] + self.key
     def __repr__(self):
-        return "    %02x: %s = %s" % (self.unknown, binascii.b2a_hex(self.key), binascii.b2a_hex(self.val))
+        return " %02x:%02x: %s = %s" % (self.unknown1, self.unknown, binascii.b2a_hex(self.key), binascii.b2a_hex(self.val))
 
 
 class BTree(object):
@@ -340,6 +383,7 @@ class BTree(object):
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
                 self.indent, self.unknown, self.recofs = struct.unpack_from("<BBH", data, ofs)
+                self.unknown1 = 0
                 self.recofs += 1   # skip unused zero byte in each key/value record
                 super(self.__class__, self).__init__(key, data)
 
@@ -356,7 +400,7 @@ class BTree(object):
                 super(self.__class__, self).__init__(data)
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
-                self.indent, self.unknown, self.recofs = struct.unpack_from("<HHH", data, ofs)
+                self.indent, self.unknown1, self.unknown, self.recofs = struct.unpack_from("<BBHH", data, ofs)
                 self.recofs += 1   # skip unused zero byte in each key/value record
                 super(self.__class__, self).__init__(key, data)
 
@@ -372,7 +416,7 @@ class BTree(object):
                 super(self.__class__, self).__init__(data)
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
-                self.indent, self.unknown, self.recofs = struct.unpack_from("<HHH", data, ofs)
+                self.indent, self.unknown1, self.unknown, self.recofs = struct.unpack_from("<BBHH", data, ofs)
                 super(self.__class__, self).__init__(key, data)
 
         def __init__(self, data):
@@ -495,7 +539,6 @@ class BTree(object):
             page = self.readpage(page.getpage(ix))
 
         cursor = BTree.Cursor(self, stack)
-        print("found %s" % act)
 
         if act==rel:
             pass
@@ -566,9 +609,72 @@ class BTree(object):
 
 
 class ID0File(object):
+    """
+    Reads .id0 or 0.ida  files, containing a v1.5, v1.6 or v2.0 b-tree database.
+    """
     INDEX = 0
     def __init__(self, idb, fh):
         self.btree = BTree(fh)
+
+        if idb.magic == b'IDA2':
+            self.wordsize, self.fmt = 8, "Q"
+            self.nodebase = 0xFF00000000000000
+        else:
+            self.wordsize, self.fmt = 4, "L"
+            self.nodebase = 0xFF000000
+        self.keyfmt = ">B"+self.fmt+"s"+self.fmt.lower()
+
+    def nodeByName(self, name):
+        # note: really long names are encoded differently:
+        #  'N'+pack('Q', nameid)  => ofs
+        #  and  (ofs, 'N') -> nameid
+
+        # at nodebase ( 0xFF000000, 'S', 0x100*nameid )  there is a series of blobs for max 0x80000 sized names.
+        cur = self.btree.find('eq', b'N'+name.encode('utf-8'))
+        if cur:
+            return struct.unpack('<'+self.fmt, cur.getval())[0]
+    def makekey(self, *args):
+        if len(args)>1:
+            args = args[:1]+(args[1].encode('utf-8'),)+args[2:]
+        return struct.pack(self.keyfmt[:2+len(args)], 0x2e, *args)
+    def bytes(self, *args):
+        if len(args)==1 and isinstance(args[0], BTree.Cursor):
+            cur = args[0]
+        else:
+            cur = self.btree.find('eq', self.makekey(*args))
+
+        if cur:
+            return cur.getval()
+    def int(self, *args):
+        data = self.bytes(*args)
+        if data is not None:
+            if len(data)==1:
+                return struct.unpack("<B", data)[0]
+            if len(data)==2:
+                return struct.unpack("<H", data)[0]
+            if len(data)==4:
+                return struct.unpack("<L", data)[0]
+            if len(data)==8:
+                return struct.unpack("<Q", data)[0]
+            print("can't get int from %s" % binascii.b2a_hex(data))
+    def string(self, *args):
+        data = self.bytes(*args)
+        if data is not None:
+            return data.rstrip(b"\x00").decode('utf-8')
+
+    def nextkey(self, key):
+        return  key[:-1] +  struct.pack("B", struct.unpack_from("B", key, -1)[0]+1 )
+    def blob(self, *args):
+        # some blobs are stored with an offset ( like big names )
+        #   in that case 'endkey' is currently wrong.
+        startkey = self.makekey(*args)
+        endkey = self.nextkey(startkey)
+        cur = self.btree.find('ge', startkey)
+        data = b''
+        while cur.getkey() < endkey:
+            data += cur.getval()
+            cur.next()
+        return data
 
 """
 "$ MAX LINK"
@@ -586,73 +692,111 @@ class ID0File(object):
 
 
 class ID1File(object):
+    """ reads .id1 or 1.IDA files, containing byte flags """
     INDEX = 1
+
+    class SegInfo:
+        def __init__(self, startea, endea, offset):
+            self.startea = startea
+            self.endea   = endea
+            self.offset  = offset
+
     def __init__(self, idb, fh):
         if idb.magic == b'IDA2':
             wordsize, fmt = 8, "Q"
         else:
             wordsize, fmt = 4, "L"
+        # todo: verify wordsize using the following heuristic:
+        #  L -> starting at: seglistofs + nsegs*seginfosize  are all zero
+        #  L -> starting at seglistofs .. nsegs*seginfosize every even word must be unique
 
         self.fh = fh
         fh.seek(0)
         hdrdata = fh.read(32)
         magic = hdrdata[:4]
-        if magic == b'Va4\x00':
+        if magic in (b'Va4\x00', b'Va3\x00', b'Va0\x00'):
             nsegments, npages = struct.unpack_from("<HH", hdrdata, 4)
             #  filesize / npages == 0x2000  for all cases
+            seglistofs = 8
+            seginfosize = 3
         elif magic == b'VA*\x00':
             always3, nsegments, always2k, npages = struct.unpack_from("<LLLL", hdrdata, 4)
+            if always3!=3:
+                print("ID1: first dword != 3: %08x" % always3)
+            if always2k!=0x800:
+                print("ID1: third dword != 2k: %08x" % always2k)
+            seglistofs = 20
+            seginfosize = 2
         else:
             raise Exception("unknown id1 magic: %s" % binascii.b2a_hex(magic))
 
         self.seglist = []
         # Va0  - ida v3.0.5
         # Va3  - ida v3.6
-        if magic == b'Va4\x00':
-            fh.seek(8)
+        fh.seek(seglistofs)
+        if magic in (b'Va4\x00', b'Va3\x00', b'Va0\x00'):
             segdata = fh.read(nsegments * 3 * wordsize)
             for o in range(nsegments):
-                startea, endea, id1ofs = struct.unpack_from("<"+fmt+fmt+fmt, segdata, i * 3 * wordsize)
-                self.seglist.append((startea, endea, id1ofs))
-
+                startea, endea, id1ofs = struct.unpack_from("<"+fmt+fmt+fmt, segdata, o * seginfosize * wordsize)
+                self.seglist.append(self.SegInfo(startea, endea, id1ofs))
         elif magic == b'VA*\x00':
-            fh.seek(20)
             segdata = fh.read(nsegments * 2 * wordsize)
             id1ofs = 0x2000
             for o in range(nsegments):
-                startea, endea = struct.unpack_from("<"+fmt+fmt, segdata, i * 2 * wordsize)
-                self.seglist.append((startea, endea, id1ofs))
+                startea, endea = struct.unpack_from("<"+fmt+fmt, segdata, o * seginfosize * wordsize)
+                self.seglist.append(self.SegInfo(startea, endea, id1ofs))
                 id1ofs += 4*(endea-startea)
+
+    def is32bit_heuristic(self, fh, seglistofs):
+        fh.seek(seglistofs)
+        # todo: verify wordsize using the following heuristic:
+        #  L -> starting at: seglistofs + nsegs*seginfosize  are all zero
+        #  L -> starting at seglistofs .. nsegs*seginfosize every even word must be unique
+
+    def dump(self):
+        for seg in self.seglist:
+            print("==== %08x-%08x" % (seg.startea,seg.endea))
+            if seg.endea-seg.startea < 30:
+                for ea in range(seg.startea, seg.endea):
+                    print("    %08x: %08x" % (ea, self.getFlags(ea)))
+            else:
+                for ea in range(seg.startea, seg.startea+10):
+                    print("    %08x: %08x" % (ea, self.getFlags(ea)))
+                print("...")
+                for ea in range(seg.endea-10, seg.endea):
+                    print("    %08x: %08x" % (ea, self.getFlags(ea)))
 
     def find_segment(self, ea):
         for seg in self.seglist:
-            if seg.startea <= ea < self.endea:
+            if seg.startea <= ea < seg.endea:
                 return seg
 
     def getFlags(self, ea):
         seg = self.find_segment(ea)
-        self.fh.seek(seg.ofs+4*(ea-seg.startea))
-        return struct.unpack("<L", self.fh.read(4))
-    def FirstSeg(self):
-        return self.seglist[0][0]
-    def NextSeg(self, ea):
+        self.fh.seek(seg.offset+4*(ea-seg.startea))
+        return struct.unpack("<L", self.fh.read(4))[0]
+
+    def firstSeg(self):
+        return self.seglist[0].startea
+
+    def nextSeg(self, ea):
         for i, seg in enumerate(self.seglist):
-            if seg.startea <= ea < self.endea:
+            if seg.startea <= ea < seg.endea:
                 if i+1<len(self.seglist):
-                    return self.seglist[i+1][0]
+                    return self.seglist[i+1].startea
                 else:
                     return
-    def SegStart(self, ea):
+    def segStart(self, ea):
         seg = self.find_segment(ea)
-        return seg[0]
-    def SegEnd(self, ea):
+        return seg.startea
+    def segEnd(self, ea):
         seg = self.find_segment(ea)
-        return seg[1]
+        return seg.endea
 
 class NAMFile(object):
+    """ reads .nam or NAMES.IDA files, containing ptrs to named items """
     INDEX = 2
     def __init__(self, idb, fh):
-        pass
         if idb.magic == b'IDA2':
             wordsize, fmt = 8, "Q"
         else:
@@ -664,31 +808,57 @@ class NAMFile(object):
         magic = hdrdata[:4]
         # Va0  - ida v3.0.5
         # Va1  - ida v3.6
-        if magic == b'Va4\x00':
+        if magic in (b'Va4\x00', b'Va1\x00', b'Va0\x00'):
             always1, npages, always0, nnames, pagesize = struct.unpack_from("<HH"+fmt+fmt+"L", hdrdata, 4)
+            if always1!=1: print("nam: first hw = %d" % always1)
+            if always0!=0: print("nam: third dw = %d" % always0)
         elif magic == b'VA*\x00':
             always3, always1, always2k, npages, always0, nnames = struct.unpack_from("<LLLL"+fmt+"L", hdrdata, 4)
+            if always3!=3: print("nam: 3 hw = %d" % always3)
+            if always1!=1: print("nam: 1 hw = %d" % always1)
+            if always0!=0: print("nam: 0 dw = %d" % always0)
+            if always2k!=0x800: print("nam: 2k dw = %d" % always2k)
+            pagesize = 0x2000
         else:
-            raise Exception("unknown id1 magic: %s" % binascii.b2a_hex(magic))
+            raise Exception("unknown nam magic: %s" % binascii.b2a_hex(magic))
         if idb.magic == b'IDA2':
             nnames /= 2
         self.wordsize = wordsize
         self.wordfmt = fmt
+        self.nnames = nnames
+        self.pagesize = pagesize
+        print("nam: nnames=%d, npages=%d, pagesize=%08x" % (nnames, npages, pagesize))
 
+    def dump(self):
+        pass
+    def allnames(self):
+        self.fh.seek(self.pagesize)
+        n = 0
+        while n<self.nnames:
+            data = self.fh.read(self.pagesize)
+            want = min(self.nnames-n, int(self.pagesize/self.wordsize))
+            ofs = struct.unpack_from("<" + self.wordfmt*want, data, 0)
+            for ea in ofs:
+                yield ea
+            n += want
 
 
 
 class SEGFile(object):
+    """ reads .seg or $SEGS.IDA files.  """
     INDEX = 3
     def __init__(self, idb, fh):
         pass
 
 class TILFile(object):
+    """ reads .til files """
     INDEX = 4
     def __init__(self, idb, fh):
         pass
+# note: v3 databases had a .reg instead of .til 
 
 class ID2File(object):
+    """ reads .id2 files """
     INDEX = 5
 
     # contains 'packed' data ( like struct information )
