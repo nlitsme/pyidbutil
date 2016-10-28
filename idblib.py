@@ -416,7 +416,8 @@ class BTree(object):
                 super(self.__class__, self).__init__(data)
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
-                self.indent, self.unknown1, self.unknown, self.recofs = struct.unpack_from("<BBHH", data, ofs)
+                self.indent, self.unknown, self.recofs = struct.unpack_from("<HHH", data, ofs)
+                self.unknown1 = 0
                 super(self.__class__, self).__init__(key, data)
 
         def __init__(self, data):

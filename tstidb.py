@@ -9,12 +9,13 @@ if sys.version_info[0] == 2:
 
 import struct
 import binascii
-import idbutils
 import argparse
 import itertools
 import traceback
 
 from datetime import datetime
+
+import idblib
 
 ######### ida value packing
 
@@ -297,26 +298,26 @@ def processidb(args, idb):
         if ofs:
             part = idb.getpart(i)
             print("%2d: %02x, %08x %8x:  %s" % (i, comp, ofs, size, binascii.b2a_hex(part.read(256))))
-    processid0(args, idb.getsection(idbutils.ID0File))
-    processid1(args, idb.getsection(idbutils.ID1File))
-    processid2(args, idb.getsection(idbutils.ID2File))
-    processnam(args, idb.getsection(idbutils.NAMFile))
-    processtil(args, idb.getsection(idbutils.TILFile))
-    processseg(args, idb.getsection(idbutils.SEGFile))
+    processid0(args, idb.getsection(idblib.ID0File))
+    processid1(args, idb.getsection(idblib.ID1File))
+    processid2(args, idb.getsection(idblib.ID2File))
+    processnam(args, idb.getsection(idblib.NAMFile))
+    processtil(args, idb.getsection(idblib.TILFile))
+    processseg(args, idb.getsection(idblib.SEGFile))
 
     if args.names:
-        nam = idb.getsection(idbutils.NAMFile)
-        id0 = idb.getsection(idbutils.ID0File)
+        nam = idb.getsection(idblib.NAMFile)
+        id0 = idb.getsection(idblib.ID0File)
         dumpnames(id0, nam)
 
     if args.scripts:
-        id0 = idb.getsection(idbutils.ID0File)
+        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ scriptsnippets', dumpscript)
     if args.structs:
-        id0 = idb.getsection(idbutils.ID0File)
+        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ structs', dumpstruct)
     if args.enums:
-        id0 = idb.getsection(idbutils.ID0File)
+        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ enums', dumpenum)
 
 
@@ -334,19 +335,19 @@ def processfile(args, filetypehint, fh):
         fh.seek(-64,1)
         if magic.startswith(b"Va") or magic.startswith(b"VA"):
             idb = DummyIDB(args)
-            if filetypehint=='id1': processid1(args, idbutils.ID1File(idb, fh))
-            elif filetypehint=='nam': processnam(args, idbutils.NAMFile(idb, fh))
-            elif filetypehint=='seg': processseg(args, idbutils.SEGFile(idb, fh))
+            if filetypehint=='id1': processid1(args, idblib.ID1File(idb, fh))
+            elif filetypehint=='nam': processnam(args, idblib.NAMFile(idb, fh))
+            elif filetypehint=='seg': processseg(args, idblib.SEGFile(idb, fh))
             else:
                 print("unknown VA type file: %s" % binascii.b2a_hex(magic))
         elif magic.startswith(b"IDAS"):
-            processid2(args, idbutils.ID2File(DummyIDB(args), fh))
+            processid2(args, idblib.ID2File(DummyIDB(args), fh))
         elif magic.startswith(b"IDATIL"):
-            processtil(args, idbutils.ID2File(DummyIDB(args), fh))
+            processtil(args, idblib.ID2File(DummyIDB(args), fh))
         elif magic.startswith(b"IDA"):
-            processidb(args, idbutils.IDBFile(fh))
+            processidb(args, idblib.IDBFile(fh))
         elif magic.find(b'B-tree v')>0:
-            processid0(args, idbutils.ID0File(DummyIDB(args), fh))
+            processid0(args, idblib.ID0File(DummyIDB(args), fh))
 
     except Exception as e:
         print("ERROR %s" % e)
