@@ -1,5 +1,5 @@
 """
-idbutils - a module for reading hex-rays Interactive DisAssembler databases
+idblib - a module for reading hex-rays Interactive DisAssembler databases
 
 Supports database versions starting with IDA v2.0 
 
@@ -7,6 +7,7 @@ IDA v1.x  is not supported, that was an entirely different file format.
 IDA v2.x  databases are organised as several files, in a directory
 IDA v3.x  databases are bundled into .idb files
 
+Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
 
 """
 from __future__ import division, print_function, absolute_import, unicode_literals
@@ -16,9 +17,11 @@ import binascii
 try:
     cmp(1,2)
 except:
+    # python3 does not have cmp
     def cmp(a,b): return (a>b)-(a<b)
 
 def nonefmt(fmt, item):
+    # helper for outputting None without raising an error
     if item is None:
         return "-"
     return fmt % item
@@ -29,6 +32,9 @@ class FileSection(object):
 
     `fh` is expected to have a seek and read method.
 
+
+    This class is used to access a section (e.g. the .id0 file) of a larger file (e.g. the .idb file)
+    and make read/seek behave as if it were a seperate file.
     """
     def __init__(self, fh, start, end):
         self.fh = fh
@@ -48,7 +54,6 @@ class FileSection(object):
         return data
 
     def seek(self, offset, *args):
-
         def isvalidpos(offset):
             return 0 <= offset <= self.end-self.start
 
@@ -73,6 +78,32 @@ class FileSection(object):
 
     def tell(self):
         return self.curpos
+
+
+import unittest
+class TestFileSection(unittest.TestCase):
+    """ unittest for FileSection object """
+    def test_file(self):
+        import StringIO
+        s = StringIO.StringIO("0123456789abcdef")
+        fh = FileSection(s, 3, 11)
+        self.assertEqual(fh.read(3), "345")
+        self.assertEqual(fh.read(8), "6789a")
+        self.assertEqual(fh.read(8), "")
+
+        fh.seek(-1,2)
+        self.assertEqual(fh.read(8), "a")
+        fh.seek(3)
+        self.assertEqual(fh.read(2), "67")
+        fh.seek(-2,1)
+        self.assertEqual(fh.read(2), "67")
+        fh.seek(2,1)
+        self.assertEqual(fh.read(2), "a")
+
+        fh.seek(8)
+        self.assertEqual(fh.read(1), "")
+        with self.assertRaises(Exception):
+            fh.seek(9)
 
 
 class CompressedStream(object):
@@ -100,32 +131,17 @@ class CompressedStream(object):
         return self.curpos
 
 
-import unittest
-class TestFileSection(unittest.TestCase):
-    def test_file(self):
-        import StringIO
-        s = StringIO.StringIO("0123456789abcdef")
-        fh = FileSection(s, 3, 11)
-        self.assertEqual(fh.read(3), "345")
-        self.assertEqual(fh.read(8), "6789a")
-        self.assertEqual(fh.read(8), "")
-
-        fh.seek(-1,2)
-        self.assertEqual(fh.read(8), "a")
-        fh.seek(3)
-        self.assertEqual(fh.read(2), "67")
-        fh.seek(-2,1)
-        self.assertEqual(fh.read(2), "67")
-        fh.seek(2,1)
-        self.assertEqual(fh.read(2), "a")
-
-        fh.seek(8)
-        self.assertEqual(fh.read(1), "")
-        with self.assertRaises(Exception):
-            fh.seek(9)
-
 class IDBFile(object):
+    """
+    Provide access to the various parts of an .idb file.
+
+    Usage:
+
+    idb = IDBFile(fhandle)
+    id0 = idb.getsection(ID0File)
+    """
     def __init__(self, fh):
+        """ constructor takes a filehandle """
         self.fh = fh
         self.fh.seek(0)
         hdrdata = self.fh.read(0x100)
@@ -163,6 +179,11 @@ class IDBFile(object):
         self.fileversion = fileversion
 
     def getsectioninfo(self, i):
+        """
+        Returns section parameters by index.
+
+        Sections are stored in a fixed order: id0, id1, nam, seg, til, id2
+        """
         if not 0<=i<len(self.offsets):
             return 0,0,0
 
@@ -179,6 +200,9 @@ class IDBFile(object):
         return comp, ofs, size
 
     def getpart(self, ix):
+        """
+        Returns a fileobject for the specified section.
+        """
         if self.offsets[ix]==0:
             return
 
@@ -194,9 +218,17 @@ class IDBFile(object):
         return fh
 
     def getsection(self, cls):
+        """
+        Constructs an object for the specified section.
+        """
         return cls(self, self.getpart(cls.INDEX))
 
 class RecoverIDBFile:
+    """
+    RecoverIDBFile has the same interface as IDBFile, but expects the database to be split over several files.
+
+    This is useful for opening  IDAv2.x databases, or for recovering data from unclosed databases.
+    """
     id2ext = [ 'id0', 'id1', 'nam', 'seg', 'til', 'id2' ]
     def __init__(self, args, basepath, dbfiles):
         if args.i64:
@@ -205,6 +237,7 @@ class RecoverIDBFile:
             self.magic = 'IDA1'
         self.basepath = basepath
         self.dbfiles = dbfiles
+        self.fileversion = 0
 
     def getsectioninfo(self, i):
         if not 0<=i<len(self.id2ext):
@@ -219,11 +252,14 @@ class RecoverIDBFile:
             return None
         ext = self.id2ext[ix]
         if ext not in self.dbfiles:
-            return NOne
+            print("can't find %s" % ext)
+            return None
         return open(self.dbfiles[ext], "rb")
 
     def getsection(self, cls):
-        return cls(self, self.getpart(cls.INDEX))
+        part = self.getpart(cls.INDEX)
+        if part:
+            return cls(self, part)
 
 # v1..v5  id1 and nam files start with 'Va4'
 # v6      id1 and nam files start with 'VA*'
@@ -231,9 +267,9 @@ class RecoverIDBFile:
 # id2 files start with 'IDAS\x1d\xa5\x55\x55'
 
 ###### moving these outside of BTree
-###### so i can use them as baseclasses in the variou page implementations
+###### so i can use them as baseclasses in the various page implementations
 def binary_search(a, k):
-    # c++: a.upperbound(k)--
+    """ like c++: a.upperbound(k)-- """
     first, last = 0, len(a)
     while first<last:
         mid = (first+last)>>1
@@ -244,6 +280,7 @@ def binary_search(a, k):
     return first-1
 
 class TestBinarySearch(unittest.TestCase):
+    """ unittests for binary_search """
     class Object:
         def __init__(self, num):
             self.key = num
@@ -296,6 +333,12 @@ class TestBinarySearch(unittest.TestCase):
 
 
 class BaseIndexEntry(object):
+    """
+    Baseclass for Index Entries.
+
+    Index entries have a key + value, and a page containing keys larger than that key
+    in this index entry.
+    """
     def __init__(self, data):
         ofs = self.recofs
         keylen, = struct.unpack_from("<H", data, ofs) ; ofs += 2
@@ -307,6 +350,15 @@ class BaseIndexEntry(object):
 
 
 class BaseLeafEntry(BaseIndexEntry):
+    """
+    Baseclass for Leaf Entries
+
+    Leaf entries have a key + value, and an `indent`
+
+    The `indent` is there to save space in the index, since subsequent keys
+    usually are very similar.
+    The indent specifies the offset where this key is different from the previous key
+    """
     def __init__(self, key, data):
         """ leaf entries get the previous key a an argument. """
         super(BaseLeafEntry, self).__init__(data)
@@ -316,7 +368,20 @@ class BaseLeafEntry(BaseIndexEntry):
 
 
 class BTree(object):
+    """
+    BTree is the IDA main database engine.
+    It provides allows the user to do a binary search for records with
+    a specified key relation ( >, <, ==, >=, <= )
+    """
     class BasePage(object):
+        """
+        Baseclass for Pages. for the various btree versions ( 1.5, 1.6 and 2.0 )
+        there are subclasses which specify the exact layout of the page header,
+        and index / leaf entries.
+
+        Leaf pages don't have a 'preceeding' page pointer.
+
+        """
         def __init__(self, data, entsize, entfmt):
             self.preceeding, self.count = struct.unpack_from(entfmt, data)
             if self.preceeding:
@@ -331,6 +396,7 @@ class BTree(object):
                 self.index.append(ent)
                 key = ent.key
             self.unknown, self.freeptr = struct.unpack_from(entfmt, data, entsize*(1+self.count))
+
         def find(self, key):
             """
             Searches pages for key, returns relation to key:
@@ -359,14 +425,19 @@ class BTree(object):
             return ('lt', i)
 
         def getpage(self, ix):
+            """ For Indexpages, returns the page ptr for the specified entry """
             return self.preceeding if ix<0 else self.index[ix].page
         def getkey(self, ix):
+            """ For all page types, returns the key for the specified entry """
             return self.index[ix].key
         def getval(self, ix):
+            """ For all page types, returns the value for the specified entry """
             return self.index[ix].val
         def isleaf(self):
+            """ True when this is a Leaf Page """
             return self.preceeding == 0
         def isindex(self):
+            """ True when this is an Index Page """
             return self.preceeding != 0
         def __repr__(self):
             return ("leaf" if self.isleaf() else ("index<%d>" % self.preceeding))+repr(self.index)
@@ -429,11 +500,15 @@ class BTree(object):
 
         It has methods for moving to the next or previous item.
         And methods for retrieving the key and value of the current position
+
+        The position is represented as a list of (page, index) tuples
         """
         def __init__(self, db, stack):
             self.db = db
             self.stack = stack
+
         def next(self):
+            """ move cursor to next entry """
             page, ix = self.stack.pop()
             if page.isleaf():
                 # from leaf move towards root
@@ -455,6 +530,7 @@ class BTree(object):
                 self.stack.append((page, ix))
 
         def prev(self):
+            """ move cursor to the previous entry """
             page, ix = self.stack.pop()
             ix -= 1
             if page.isleaf():
@@ -474,9 +550,11 @@ class BTree(object):
         def eof(self):
             return len(self.stack)==0
         def getkey(self):
+            """ return the key value pointed to by the cursor """
             page, ix = self.stack[-1]
             return page.getkey(ix)
         def getval(self):
+            """ return the data value pointed to by the cursor """
             page, ix = self.stack[-1]
             return page.getval(ix)
         def __repr__(self):
@@ -485,6 +563,7 @@ class BTree(object):
 
 
     def __init__(self, fh):
+        """ BTree constructor - takes a filehandle """
         self.fh = fh
 
         self.fh.seek(0)
@@ -522,6 +601,10 @@ class BTree(object):
         """
         Searches for a record with the specified relation to the key
 
+        A cursor object is returned, the user can call getkey, getval on the cursor
+        to retrieve the actual value.
+        or call cursor.next() / cursor.prev() to enumerate values.
+
         'eq'  -> record equal to the key, None when not found
         'le'  -> last record with key <= to key
         'ge'  -> first record with key >= to key
@@ -529,7 +612,7 @@ class BTree(object):
         'gt'  -> first record with key > to key
         """
 
-        #print("searching for rec %s to %s" % (rel, binascii.b2a_hex(key)))
+        # descend tree to leaf nearest to the `key`
         page = self.readpage(self.firstindex)
         stack = []
         while True:
@@ -541,6 +624,7 @@ class BTree(object):
 
         cursor = BTree.Cursor(self, stack)
 
+        # now correct for what was actually asked.
         if act==rel:
             pass
         elif rel=='eq' and act!='eq':
@@ -559,11 +643,13 @@ class BTree(object):
         return cursor
 
     def dump(self):
+        """ raw dump of all records in the b-tree """
         print("pagesize=%08x, reccount=%08x, pagecount=%08x" % (self.pagesize, self.reccount, self.pagecount))
         self.dumpfree()
         self.dumptree(self.firstindex)
 
     def dumpfree(self):
+        """ list all free pages """
         fmt = "L" if self.version>15 else "H"
         hdrsize = 8 if self.version>15 else 4
         pn = self.firstfree
@@ -586,7 +672,10 @@ class BTree(object):
             pn = nextfree
 
     def dumpindented(self, pn, indent=0):
-        """ dump all nodes of the current b-indented """
+        """
+        Dump all nodes of the current page with keys indented, showing how the `indent`
+        feature works
+        """
         page = self.readpage(pn)
         print("  "*indent, page)
         if page.isindex():
@@ -597,6 +686,10 @@ class BTree(object):
                 self.dumpindented(page.getpage(p), indent+1)
 
     def dumptree(self, pn):
+        """
+        Walks entire tree, dumping all records on each page
+        in sequential order
+        """
         page = self.readpage(pn)
         print("%06x: preceeding = %06x, reccount = %04x" % (pn, page.preceeding, page.count))
         for ent in page.index:
@@ -607,25 +700,51 @@ class BTree(object):
                 self.dumptree(ent.page)
 
 
-
-
 class ID0File(object):
     """
     Reads .id0 or 0.ida  files, containing a v1.5, v1.6 or v2.0 b-tree database.
+
+    This is basically the low level netnode interface from the idasdk.
+
+    There are two major groups of nodes in the database:
+
+    key = "N"+name  -> value = littleendian(nodeid)
+    key = "."+bigendian(nodeid)+char(tag)+bigendian(value)
+    key = "."+bigendian(nodeid)+char(tag)+string
+
+    key = "."+bigendian(nodeid)+char(tag)
+
+    and some special nodes for bookkeeping:
+    "$ MAX LINK"
+    "$ MAX NODE"
+    "$ NET DESC"
+
+    Very old databases also have name entries with a lowercase 'n',
+    and corresponding '-'+value nodes.
+    I am not sure what those are for.
+
+    several items have specially named nodes, like "$ structs", "$ enums", "Root Node"
+
+    nodeByName(name)  returns the nodeid for a name
+    bytes(nodeid, tag, val)  returns the value for a specific node.
     """
     INDEX = 0
     def __init__(self, idb, fh):
         self.btree = BTree(fh)
 
         if idb.magic == b'IDA2':
+            # .i64 files use 64 bit values for some things.
             self.wordsize, self.fmt = 8, "Q"
             self.nodebase = 0xFF00000000000000
         else:
             self.wordsize, self.fmt = 4, "L"
             self.nodebase = 0xFF000000
-        self.keyfmt = ">B"+self.fmt+"s"+self.fmt.lower()
+
+        # set the keyformat for this database
+        self.keyfmt = ">B"+self.fmt+"s"+self.fmt
 
     def nodeByName(self, name):
+        """ Return a nodeid by name """
         # note: really long names are encoded differently:
         #  'N'+pack('Q', nameid)  => ofs
         #  and  (ofs, 'N') -> nameid
@@ -634,11 +753,23 @@ class ID0File(object):
         cur = self.btree.find('eq', b'N'+name.encode('utf-8'))
         if cur:
             return struct.unpack('<'+self.fmt, cur.getval())[0]
+
     def makekey(self, *args):
+        """ return a binary key for the nodeid, tag and optional value """
         if len(args)>1:
             args = args[:1]+(args[1].encode('utf-8'),)+args[2:]
-        return struct.pack(self.keyfmt[:2+len(args)], 0x2e, *args)
+        if len(args)==3 and type(args[-1])==str:
+            # node.tag.string type keys
+            return struct.pack(self.keyfmt[:1+len(args)], 0x2e, *args[:-1]) + args[-1].encode('utf-8')
+        elif len(args)==3 and type(args[-1]) == type(-1) and args[-1]<0:
+            # negative values -> need lowercase fmt char
+            return struct.pack(self.keyfmt[:1+len(args)] + self.fmt.lower(), 0x2e, *args)
+        else:
+            # node.tag.value type keys
+            return struct.pack(self.keyfmt[:2+len(args)], 0x2e, *args)
+
     def bytes(self, *args):
+        """ return a raw value for the given arguments """
         if len(args)==1 and isinstance(args[0], BTree.Cursor):
             cur = args[0]
         else:
@@ -646,7 +777,14 @@ class ID0File(object):
 
         if cur:
             return cur.getval()
+
     def int(self, *args):
+        """
+        Return the integer stored in the specified node.
+
+        Any type of integer will be decoded: byte, short, long, long long
+
+        """
         data = self.bytes(*args)
         if data is not None:
             if len(data)==1:
@@ -658,13 +796,17 @@ class ID0File(object):
             if len(data)==8:
                 return struct.unpack("<Q", data)[0]
             print("can't get int from %s" % binascii.b2a_hex(data))
+
     def string(self, *args):
+        """ return string stored in node """
         data = self.bytes(*args)
         if data is not None:
             return data.rstrip(b"\x00").decode('utf-8')
 
     def nextkey(self, key):
+        """ increment key value by one """
         return  key[:-1] +  struct.pack("B", struct.unpack_from("B", key, -1)[0]+1 )
+
     def blob(self, *args):
         # some blobs are stored with an offset ( like big names )
         #   in that case 'endkey' is currently wrong.
@@ -677,23 +819,14 @@ class ID0File(object):
             cur.next()
         return data
 
-"""
-"$ MAX LINK"
-"$ MAX NODE"
-"$ NET DESC"
-
-"-%08x"
-".%08x%c%s"
-"N%s"
-"N$ %s"
-"n$ %s"
-"""
-
-
-
 
 class ID1File(object):
-    """ reads .id1 or 1.IDA files, containing byte flags """
+    """
+    Reads .id1 or 1.IDA files, containing byte flags
+
+    This is basically the information for the .idc GetFlags(ea),
+    FirstSeg(), NextSeg(ea), SegStart(ea), SegEnd(ea) functions
+    """
     INDEX = 1
 
     class SegInfo:
@@ -755,6 +888,7 @@ class ID1File(object):
         #  L -> starting at seglistofs .. nsegs*seginfosize every even word must be unique
 
     def dump(self):
+        """ print first and last bits for each segment """
         for seg in self.seglist:
             print("==== %08x-%08x" % (seg.startea,seg.endea))
             if seg.endea-seg.startea < 30:
@@ -768,6 +902,7 @@ class ID1File(object):
                     print("    %08x: %08x" % (ea, self.getFlags(ea)))
 
     def find_segment(self, ea):
+        """ do a linear search for the given address in the segment list """
         for seg in self.seglist:
             if seg.startea <= ea < seg.endea:
                 return seg
