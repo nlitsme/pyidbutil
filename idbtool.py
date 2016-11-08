@@ -1,3 +1,9 @@
+"""
+Tool for querying information from Hexrays .idb files
+without launching IDA.
+
+Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
+"""
 from __future__ import division, print_function, absolute_import, unicode_literals
 import sys
 #reload(sys)
@@ -20,6 +26,7 @@ import idblib
 ######### ida value packing
 
 def idaunpack(buf):
+    """ special data packing format, used in struct definitions, and .id2 files """
     buf = bytearray(buf)
     def nextval(o):
         val = buf[o] ; o += 1
@@ -54,16 +61,24 @@ def timestring(t):
     return datetime.strftime(datetime.fromtimestamp(t), "%Y-%m-%d %H:%M:%S")
 def strz(b, o):
     return b[o:b.find(b'\x00', o)].decode('utf-8', 'ignore')
+
+
 ######### license encoding
 
 def decryptuser(data):
+    """
+    The original-user node is encrypted with hexray's private key.
+    Hence we can easily decrypt it, but not change it to something else.
+
+    We can however copy the entry from another database, or just replace it with garbage.
+    """
     data = int(binascii.b2a_hex(data[127::-1]),16)
     user = pow(data, 0x13, 0x93AF7A8E3A6EB93D1B4D1FB7EC29299D2BC8F3CE5F84BFE88E47DDBDD5550C3CE3D2B16A2E2FBD0FBD919E8038BB05752EC92DD1498CB283AA087A93184F1DD9DD5D5DF7857322DFCD70890F814B58448071BBABB0FC8A7868B62EB29CC2664C8FE61DFBC5DB0EE8BF6ECF0B65250514576C4384582211896E5478F95C42FDED)
     user = binascii.a2b_hex("%0256x" % user)
     return user[1:]
 
 def licensestring(lic):
-
+    """ decode a license blob """
     if len(lic)!=127:
         print("unknown license format: %s" % binascii.b2a_hex(lic))
         return
@@ -91,6 +106,7 @@ def licensestring(lic):
         return "v%04d %s .. %s  %s  %s" % (licver, timestring(time1), timestring(time2), licid, licensee)
 
 def dumpuser(id0):
+    """ dump the original, and current database user """
     orignode = id0.nodeByName('$ original user')
     if orignode:
         user0 = id0.bytes(orignode, 'S', 0) 
@@ -100,6 +116,7 @@ def dumpuser(id0):
     if curnode:
         user1 = id0.bytes(curnode, 'S', 0)
         print("user: %s" % licensestring(user1))
+
 
 ######### idb summary
 filetypelist= [
@@ -131,6 +148,7 @@ filetypelist= [
     "Mac OS X Mach-O file",
 ]
 def dumpinfo(id0):
+    """ print various infos on the idb file """
     def nonefmt(fmt, num):
         if num is None:
             return "-"
@@ -164,6 +182,7 @@ def dumpinfo(id0):
         if fl&512 : l.append('64bit')
         if fl&~0x3ff : l.append("unknown_%x" % (fl&~0x3ff))
         return ",".join(l)
+
     ldr = id0.nodeByName("$ loader name")
     if ldr:
         print("loader: %s %s" % (id0.string(ldr, 'S', 0), id0.string(ldr, 'S', 1)))
@@ -196,12 +215,18 @@ def dumpnames(args, id0, nam):
         print("%08x: %s" % (ea, id0.string(ea, 'N')))
 
 def dumpscript(id0, node):
+    """ dump all stored scripts """
     name = id0.string(node, 'S', 0)
     lang = id0.string(node, 'S', 1)
     body = id0.blob(node, 'X').rstrip(b'\x00').decode('utf-8')
 
     print("======= %s %s =======" % (lang, name))
     print(body)
+
+def hexdump(x):
+    if x is None:
+        return None
+    return " ".join("%02x" % _ for _ in x)
 
 def dumpstructmember(id0, spec):
     print("%08x %02x %02x %08x %02x: " % tuple(spec), end="")
@@ -210,8 +235,11 @@ def dumpstructmember(id0, spec):
     name = id0.string(nodeid, 'N')
     enumid = id0.int(nodeid, 'A', 11)
     struct = id0.int(nodeid, 'A', 3)
-    ptrseg = id0.int(nodeid, 'S', 9)
-    eltype = id0.int(nodeid, 'S', 0x3000)
+    # 'A', 16 - stringtype
+    # 'S', 0 - member comment
+    # 'S', 1 - repeatable member comment
+    ptrseg = hexdump(id0.bytes(nodeid, 'S', 9))
+    eltype = hexdump(id0.bytes(nodeid, 'S', 0x3000))
 
     print(" %-40s" % name, end="")
     if enumid:
@@ -219,12 +247,13 @@ def dumpstructmember(id0, spec):
     if struct:
         print(" struct %08x" % struct, end="")
     if ptrseg:
-        print(" ptr %08x" % ptrseg, end="")
+        print(" ptr %s" % ptrseg, end="")
     if eltype:
-        print(" type %08x" % eltype, end="")
+        print(" type %s" % eltype, end="")
     print()
 
 def dumpstruct(id0, node):
+    """ dump all info for the struct defined by `node` """
     name = id0.string(node, 'N')
     packed = id0.blob(node, 'M')
     spec = idaunpack(packed)
@@ -240,9 +269,12 @@ def dumpenummember(id0, node):
     value = id0.int(node, 'A', -3)
     # id0.int(node, 'A', -2)  -> points back to enum
 
+    if value is None:
+        value = 0
     print("    %08x %s" % (value, name))
 
 def dumpenum(id0, node):
+    """ dump all info for the enum defined by `node` """
     name = id0.string(node, 'N')
     size = id0.int(node, 'A', -1)
     display = id0.int(node, 'A', -3)
@@ -256,9 +288,14 @@ def dumpenum(id0, node):
     while cur.getkey() < endkey:
         dumpenummember(id0, id0.int(cur)-1)
         cur.next()
+
+    # todo:  (node, 'm', i)  -> list of bitfields
     
 
 def dumplist(id0, listname, dumper):
+    """
+    Lists are all stored in a similar way.
+    """
     sroot = id0.nodeByName(listname)
     if not sroot:
         return
@@ -293,31 +330,30 @@ def processseg(args, seg):
 
 def processidb(args, idb):
     print("magic=%s, filever=%d" % (idb.magic, idb.fileversion))
-    for i in range(6):
-        comp, ofs, size = idb.getsectioninfo(i)
-        if ofs:
-            part = idb.getpart(i)
-            print("%2d: %02x, %08x %8x:  %s" % (i, comp, ofs, size, binascii.b2a_hex(part.read(256))))
-    processid0(args, idb.getsection(idblib.ID0File))
+    if args.verbose:
+        for i in range(6):
+            comp, ofs, size = idb.getsectioninfo(i)
+            if ofs:
+                part = idb.getpart(i)
+                print("%2d: %02x, %08x %8x:  %s" % (i, comp, ofs, size, binascii.b2a_hex(part.read(256))))
+
+    nam = idb.getsection(idblib.NAMFile)
+    id0 = idb.getsection(idblib.ID0File)
+    processid0(args, id0)
     processid1(args, idb.getsection(idblib.ID1File))
     processid2(args, idb.getsection(idblib.ID2File))
-    processnam(args, idb.getsection(idblib.NAMFile))
+    processnam(args, nam)
     processtil(args, idb.getsection(idblib.TILFile))
     processseg(args, idb.getsection(idblib.SEGFile))
 
     if args.names:
-        nam = idb.getsection(idblib.NAMFile)
-        id0 = idb.getsection(idblib.ID0File)
         dumpnames(id0, nam)
 
     if args.scripts:
-        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ scriptsnippets', dumpscript)
     if args.structs:
-        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ structs', dumpstruct)
     if args.enums:
-        id0 = idb.getsection(idblib.ID0File)
         dumplist(id0, '$ enums', dumpenum)
 
 
@@ -353,7 +389,7 @@ def processfile(args, filetypehint, fh):
         print("ERROR %s" % e)
 
 def recover_database(args, basepath, dbfiles):
-    processidb(args, RecoverIDBFile(args, basepath, dbfiles))
+    processidb(args, idblib.RecoverIDBFile(args, basepath, dbfiles))
 
 def DirEnumerator(args, path):
     """
@@ -437,10 +473,7 @@ All versions since IDA v2.0 are supported.
     parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records')
     parser.add_argument('--id1', "-id1", action='store_true', help='dump id1 records')
 
-    parser.add_argument('--recover', action='store_true', help='recover idb from seperate .id0 etc files')
-
-    # todo: add option to combine .id0, .id1, .nam etc in one database
-    # useful for reading v2.0 databases, and for recovering corrupted databases.
+    parser.add_argument('--recover', action='store_true', help='recover idb from unpacked files, of v2 database')
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files')
     args = parser.parse_args()
@@ -451,8 +484,9 @@ All versions since IDA v2.0 are supported.
         for fn in EnumeratePaths(args, args.FILES):
             basepath, filename = os.path.split(fn)
             if isv2name(filename):
-                d = dbs.setdefault(basepath, set())
+                d = dbs.setdefault(basepath, dict())
                 d[xlatv2name(filename)] = fn
+                print("%s -> %s : %s" % ( xlatv2name(filename), basepath, filename))
             else:
                 basepath, ext = os.path.splitext(fn)
                 if isv3ext(ext):
@@ -469,11 +503,14 @@ All versions since IDA v2.0 are supported.
             except Exception as e:
                 print("ERROR: %s" % e)
             
-            if args.recover:
-                for basepath, dbfiles in dbs.items():
-                    if len(dbfiles)>1:
+        if args.recover:
+            for basepath, dbfiles in dbs.items():
+                if len(dbfiles)>1:
+                    try:
                         print("\n==> " + basepath + " <==\n")
                         recover_database(args, basepath, dbfiles)
+                    except Exception as e:
+                        print("ERROR: %s" % e)
     else:
         processfile(args, args.filetype, sys.stdin.buffer)
 
