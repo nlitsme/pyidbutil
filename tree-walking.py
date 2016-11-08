@@ -1,4 +1,8 @@
 """
+Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
+
+Experiment in btree walking
+
 
                    *-------->[00]
          *------>[02]---+    [01]
@@ -45,6 +49,8 @@ increment from 07  : ix++ -> ix==len(index) -> pop,    ix++ -> ix==len -> pop ->
 """
 from __future__ import division, print_function, absolute_import, unicode_literals
 
+# shape of the tree
+# a <2,2>  tree is basically like the tree pictured in the ascii art above.
 TREEDEPTH=2
 NODEWIDTH=2
 
