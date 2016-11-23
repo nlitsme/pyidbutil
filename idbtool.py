@@ -226,10 +226,14 @@ def dumpscript(id0, node):
 def hexdump(x):
     if x is None:
         return None
-    return " ".join("%02x" % _ for _ in x)
+
+    if sys.version_info[0] == 2:
+        return " ".join("%02x" % ord(_) for _ in x)
+    else:
+        return " ".join("%02x" % _ for _ in x)
 
 def dumpstructmember(id0, spec):
-    print("%08x %02x %02x %08x %02x: " % tuple(spec), end="")
+    print("     %02x %02x %08x %02x: " % tuple(spec[1:]), end="")
 
     nodeid = spec[0] + id0.nodebase
     name = id0.string(nodeid, 'N')
@@ -291,6 +295,15 @@ def dumpenum(id0, node):
 
     # todo:  (node, 'm', i)  -> list of bitfields
     
+def dumpimport(id0, node):
+    startkey = id0.makekey(node, 'A')
+    endkey = id0.makekey(node, 'B')
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        ea = id0.int(cur)
+        print("%08x: %s" % (ea, id0.string(ea, 'N')))
+        cur.next()
+
 
 def dumplist(id0, listname, dumper):
     """
@@ -307,6 +320,18 @@ def dumplist(id0, listname, dumper):
             break
         dumper(id0, snode-1)
 
+
+# todo:
+#   "$ fr[0-9a-f]+"           -- M
+#   "$ fr[0-9a-f]+. r"
+#   "$ fr[0-9a-f]+. s"
+#   "$ fr[0-9a-f]+.<varname>" -- S
+#   
+#   "$ F[0-9A-F]+"  with the same format
+#          ". r", ". s", ".<varname>"
+
+# "$ pv edges", "$ pv2 blob", "$ proximity last node"
+# "$ chooser\\".....
 
 def processid0(args, id0):
 
@@ -355,7 +380,8 @@ def processidb(args, idb):
         dumplist(id0, '$ structs', dumpstruct)
     if args.enums:
         dumplist(id0, '$ enums', dumpenum)
-
+    if args.imports:
+        dumplist(id0, '$ imports', dumpimport)
 
 
 def processfile(args, filetypehint, fh):
@@ -387,6 +413,8 @@ def processfile(args, filetypehint, fh):
 
     except Exception as e:
         print("ERROR %s" % e)
+        if args.debug:
+            raise
 
 def recover_database(args, basepath, dbfiles):
     processidb(args, idblib.RecoverIDBFile(args, basepath, dbfiles))
@@ -469,11 +497,13 @@ All versions since IDA v2.0 are supported.
     parser.add_argument('--structs', '-u', action='store_true', help='print structs')
     parser.add_argument('--comments', '-c', action='store_true', help='print comments')
     parser.add_argument('--enums', '-e', action='store_true', help='print enums')
+    parser.add_argument('--imports', action='store_true', help='print impors')
     parser.add_argument('--info', '-i', action='store_true', help='database info')
     parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records')
     parser.add_argument('--id1', "-id1", action='store_true', help='dump id1 records')
 
     parser.add_argument('--recover', action='store_true', help='recover idb from unpacked files, of v2 database')
+    parser.add_argument('--debug', action='store_true') 
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files')
     args = parser.parse_args()
@@ -502,6 +532,8 @@ All versions since IDA v2.0 are supported.
                     processfile(args, filetype, fh)
             except Exception as e:
                 print("ERROR: %s" % e)
+                if args.debug:
+                    raise
             
         if args.recover:
             for basepath, dbfiles in dbs.items():
