@@ -768,6 +768,14 @@ class ID0File(object):
             # node.tag.value type keys
             return struct.pack(self.keyfmt[:2+len(args)], 0x2e, *args)
 
+    def decodekey(self, key):
+        if len(key)==1+self.wordsize:
+            return struct.unpack(self.keyfmt[:2], key)
+        if len(key)==1+self.wordsize+1:
+            return struct.unpack(self.keyfmt[:3], key)
+        if len(key)==1+2*self.wordsize+1:
+            return struct.unpack(self.keyfmt[:4], key)
+
     def bytes(self, *args):
         """ return a raw value for the given arguments """
         if len(args)==1 and isinstance(args[0], BTree.Cursor):
