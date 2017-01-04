@@ -178,7 +178,7 @@ class Cursor:
         self.verify()
 
     def verify(self):
-        """ verify cursor state consistancy """
+        """ verify cursor state consistency """
         if len(self.stack)==3:
             if not self.stack[-1][0].isleaf():
                 print("WARN no leaf")
@@ -240,11 +240,11 @@ class Btree:
         else:
             return self.createleaf(namegen, nodesize)
     def createindex(self, namegen, depth, nodesize):
-        page = IndexPage(self.construct(namegen, depth-1, nodesize), [ (namegen.next(), self.construct(namegen, depth-1, nodesize)) for _ in range(nodesize) ])
+        page = IndexPage(self.construct(namegen, depth-1, nodesize), [ (next(namegen), self.construct(namegen, depth-1, nodesize)) for _ in range(nodesize) ])
         self.pages.append(page)
         return len(self.pages)-1
     def createleaf(self, namegen, nodesize):
-        page = LeafPage([ (namegen.next(), 0) for _ in range(nodesize) ])
+        page = LeafPage([ (next(namegen), 0) for _ in range(nodesize) ])
         self.pages.append(page)
         return len(self.pages)-1
 
