@@ -1,7 +1,7 @@
 """
 idblib - a module for reading hex-rays Interactive DisAssembler databases
 
-Supports database versions starting with IDA v2.0 
+Supports database versions starting with IDA v2.0
 
 IDA v1.x  is not supported, that was an entirely different file format.
 IDA v2.x  databases are organised as several files, in a directory
@@ -13,6 +13,12 @@ Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
 from __future__ import division, print_function, absolute_import, unicode_literals
 import struct
 import binascii
+import re
+import sys
+if sys.version_info[0] == 3:
+    long = int
+else:
+    bytes = bytearray
 
 try:
     cmp(1,2)
@@ -20,11 +26,16 @@ except:
     # python3 does not have cmp
     def cmp(a,b): return (a>b)-(a<b)
 
+
 def nonefmt(fmt, item):
     # helper for outputting None without raising an error
     if item is None:
         return "-"
     return fmt % item
+
+def hexdump(data):
+    return binascii.b2a_hex(data).decode('utf-8')
+
 
 class FileSection(object):
     """
@@ -49,6 +60,8 @@ class FileSection(object):
         if want<=0:
             return b""
 
+        # make sure filepointer is at correct position since we are sharing the fh object with others.
+        self.fh.seek(self.curpos + self.start)
         data = self.fh.read(want)
         self.curpos += len(data)
         return data
@@ -63,7 +76,7 @@ class FileSection(object):
             whence = args[0]
         if whence==0:
             if not isvalidpos(offset):
-                print("invalid seek: from %x to SET:%x" % ( self.curpos, offset ))
+                print("invalid seek: from %x to SET:%x" % (self.curpos, offset))
                 raise Exception("illegal offset")
             self.curpos = offset
         elif whence==1:
@@ -111,9 +124,11 @@ class CompressedStream(object):
     def __init__(self, fh):
         self.fh = fh
         self.curpos = 0
+
     def read(self, size):
         # todo
         return b""
+
     def seek(self, offset, *args):
 
         if len(args)==0:
@@ -146,8 +161,8 @@ class IDBFile(object):
         self.fh.seek(0)
         hdrdata = self.fh.read(0x100)
 
-        self.magic = hdrdata[0:4]
-        if self.magic not in (b'IDA0', b'IDA1', b'IDA2'):
+        self.magic = hdrdata[0:4].decode('utf-8', 'ignore')
+        if self.magic not in ('IDA0', 'IDA1', 'IDA2'):
             raise Exception("invalid file magic")
 
         values = struct.unpack_from("<6LH6L", hdrdata, 6)
@@ -168,7 +183,7 @@ class IDBFile(object):
 
                 # note: filever 4  has '0x5c', zeros, md5, more zeroes
             else:
-                values = struct.unpack_from("<QQLLHQQQQ5LQL", hdrdata, 6)
+                values = struct.unpack_from("<QQLLHQQQ5LQL", hdrdata, 6)
                 offsets = [values[_] for _ in (0,1,5,6,7,13)]
                 checksums = [values[_] for _ in (8,9,10,11,12,14)]
 
@@ -185,10 +200,10 @@ class IDBFile(object):
         Sections are stored in a fixed order: id0, id1, nam, seg, til, id2
         """
         if not 0<=i<len(self.offsets):
-            return 0,0,0
+            return 0,0,0,0
 
         if self.offsets[i]==0:
-            return 0,0,0
+            return 0,0,0,0
 
         self.fh.seek(self.offsets[i])
         if self.fileversion<5:
@@ -197,7 +212,7 @@ class IDBFile(object):
         else:
             comp, size = struct.unpack("<BQ", self.fh.read(9))
             ofs = self.offsets[i]+9
-        return comp, ofs, size
+        return comp, ofs, size, self.checksums[i]
 
     def getpart(self, ix):
         """
@@ -206,7 +221,7 @@ class IDBFile(object):
         if self.offsets[ix]==0:
             return
 
-        comp, ofs, size = self.getsectioninfo(ix)
+        comp, ofs, size, checksum = self.getsectioninfo(ix)
 
         fh = FileSection(self.fh, ofs, ofs+size)
         if comp==2:
@@ -223,6 +238,7 @@ class IDBFile(object):
         """
         return cls(self, self.getpart(cls.INDEX))
 
+
 class RecoverIDBFile:
     """
     RecoverIDBFile has the same interface as IDBFile, but expects the database to be split over several files.
@@ -230,6 +246,7 @@ class RecoverIDBFile:
     This is useful for opening  IDAv2.x databases, or for recovering data from unclosed databases.
     """
     id2ext = [ 'id0', 'id1', 'nam', 'seg', 'til', 'id2' ]
+
     def __init__(self, args, basepath, dbfiles):
         if args.i64:
             self.magic = 'IDA2'
@@ -241,11 +258,11 @@ class RecoverIDBFile:
 
     def getsectioninfo(self, i):
         if not 0<=i<len(self.id2ext):
-            return 0, 0, 0
+            return 0, 0, 0, 0
         ext = self.id2ext[i]
         if ext not in self.dbfiles:
-            return 0, 0, 0
-        return 0, 0, os.path.getsize(self.dbfiles[ext])
+            return 0, 0, 0, 0
+        return 0, 0, os.path.getsize(self.dbfiles[ext]), 0
 
     def getpart(self, ix):
         if not 0<=ix<len(self.id2ext):
@@ -266,8 +283,6 @@ class RecoverIDBFile:
 # til files start with 'IDATIL'
 # id2 files start with 'IDAS\x1d\xa5\x55\x55'
 
-###### moving these outside of BTree
-###### so i can use them as baseclasses in the various page implementations
 def binary_search(a, k):
     """ like c++: a.upperbound(k)-- """
     first, last = 0, len(a)
@@ -279,11 +294,13 @@ def binary_search(a, k):
             first = mid+1
     return first-1
 
+
 class TestBinarySearch(unittest.TestCase):
     """ unittests for binary_search """
     class Object:
         def __init__(self, num):
             self.key = num
+
         def __repr__(self):
             return "o(%d)" % self.num
 
@@ -302,12 +319,14 @@ class TestBinarySearch(unittest.TestCase):
         obj = self.Object
         lst = []
         self.assertEqual(binary_search(lst, 1), -1)
+
     def test_oneelem(self):
         obj = self.Object
         lst = [obj(1)]
         self.assertEqual(binary_search(lst, 0), -1)
         self.assertEqual(binary_search(lst, 1), 0)
         self.assertEqual(binary_search(lst, 2), 0)
+
     def test_twoelem(self):
         obj = self.Object
         lst = [obj(1), obj(3)]
@@ -338,6 +357,9 @@ class BaseIndexEntry(object):
 
     Index entries have a key + value, and a page containing keys larger than that key
     in this index entry.
+
+    ###### moving these outside of BTree
+    ###### so i can use them as baseclasses in the various page implementations
     """
     def __init__(self, data):
         ofs = self.recofs
@@ -345,9 +367,9 @@ class BaseIndexEntry(object):
         self.key = data[ofs:ofs+keylen]  ; ofs += keylen
         vallen, = struct.unpack_from("<H", data, ofs) ; ofs += 2
         self.val = data[ofs:ofs+vallen]  ; ofs += vallen
-    def __repr__(self):
-        return "%06x: %s = %s" % (self.page, binascii.b2a_hex(self.key), binascii.b2a_hex(self.val))
 
+    def __repr__(self):
+        return "%06x: %s = %s" % (self.page, hexdump(self.key), hexdump(self.val))
 
 class BaseLeafEntry(BaseIndexEntry):
     """
@@ -363,8 +385,9 @@ class BaseLeafEntry(BaseIndexEntry):
         """ leaf entries get the previous key a an argument. """
         super(BaseLeafEntry, self).__init__(data)
         self.key = key[:self.indent] + self.key
+
     def __repr__(self):
-        return " %02x:%02x: %s = %s" % (self.unknown1, self.unknown, binascii.b2a_hex(self.key), binascii.b2a_hex(self.val))
+        return " %02x:%02x: %s = %s" % (self.unknown1, self.unknown, hexdump(self.key), hexdump(self.val))
 
 
 class BTree(object):
@@ -407,42 +430,42 @@ class BTree(object):
             lt -> found a value with a key less than the one searched for.
             eq -> found a value with a key equal to the one searched for.
                        gt, lt and eq return the index for the key found.
-            """
 
             # for an index entry: the key is 'less' than anything in the page pointed to.
-
+            """
             i = binary_search(self.index, key)
             if i<0:
                 if self.isindex():
                     return ('recurse', -1)
-                #print("leaf page, searching for %s, found: %s at %d, cmp=%d  -> gt" % (binascii.b2a_hex(key), binascii.b2a_hex(self.index[0].key), i, cmp(self.index[0].key, key)))
                 return ('gt', 0)
             if self.index[i].key==key:
                 return ('eq', i)
             if self.isindex():
                 return ('recurse', i)
-            #print("leaf page, searching for %s, found: %s at %d, cmp=%d  -> lt" % (binascii.b2a_hex(key), binascii.b2a_hex(self.index[i].key), i, cmp(self.index[i].key, key)))
             return ('lt', i)
 
         def getpage(self, ix):
             """ For Indexpages, returns the page ptr for the specified entry """
             return self.preceeding if ix<0 else self.index[ix].page
+
         def getkey(self, ix):
             """ For all page types, returns the key for the specified entry """
             return self.index[ix].key
+
         def getval(self, ix):
             """ For all page types, returns the value for the specified entry """
             return self.index[ix].val
+
         def isleaf(self):
             """ True when this is a Leaf Page """
             return self.preceeding == 0
+
         def isindex(self):
             """ True when this is an Index Page """
             return self.preceeding != 0
+
         def __repr__(self):
             return ("leaf" if self.isleaf() else ("index<%d>" % self.preceeding))+repr(self.index)
-
-
 
     class Page15(BasePage):
         """ v1.5 b-tree page """
@@ -451,6 +474,7 @@ class BTree(object):
                 self.page, self.recofs = struct.unpack_from("<HH", data, ofs)
                 self.recofs += 1   # skip unused zero byte in each key/value record
                 super(self.__class__, self).__init__(data)
+
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
                 self.indent, self.unknown, self.recofs = struct.unpack_from("<BBH", data, ofs)
@@ -461,7 +485,6 @@ class BTree(object):
         def __init__(self, data):
             super(self.__class__, self).__init__(data, 4, "<HH")
 
-
     class Page16(BasePage):
         """ v1.6 b-tree page """
         class IndexEntry(BaseIndexEntry):
@@ -469,6 +492,7 @@ class BTree(object):
                 self.page, self.recofs = struct.unpack_from("<LH", data, ofs)
                 self.recofs += 1   # skip unused zero byte in each key/value record
                 super(self.__class__, self).__init__(data)
+
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
                 self.indent, self.unknown1, self.unknown, self.recofs = struct.unpack_from("<BBHH", data, ofs)
@@ -485,6 +509,7 @@ class BTree(object):
                 self.page, self.recofs = struct.unpack_from("<LH", data, ofs)
                 # unused zero byte is no longer there in v2.0 b-tree
                 super(self.__class__, self).__init__(data)
+
         class LeafEntry(BaseLeafEntry):
             def __init__(self, key, data, ofs):
                 self.indent, self.unknown, self.recofs = struct.unpack_from("<HHH", data, ofs)
@@ -549,18 +574,19 @@ class BTree(object):
 
         def eof(self):
             return len(self.stack)==0
+
         def getkey(self):
             """ return the key value pointed to by the cursor """
             page, ix = self.stack[-1]
             return page.getkey(ix)
+
         def getval(self):
             """ return the data value pointed to by the cursor """
             page, ix = self.stack[-1]
             return page.getval(ix)
+
         def __repr__(self):
             return "cursor:"+repr(self.stack)
-
-
 
     def __init__(self, fh):
         """ BTree constructor - takes a filehandle """
@@ -585,11 +611,12 @@ class BTree(object):
             self.version = 20
             print("btree v2.0")
         else:
-            print("unknown btree: %s" % binascii.b2a_hex(data))
+            print("unknown btree: %s" % hexdump(data))
             raise Exception("unknown b-tree")
 
     def parseheader15(self, data):
         self.firstfree, self.pagesize, self.firstindex, self.reccount, self.pagecount = struct.unpack_from("<HHHLH", data, 0)
+
     def parseheader16(self, data):
         self.firstfree, self.pagesize, self.firstindex, self.reccount, self.pagecount = struct.unpack_from("<LHLLL", data, 0)
 
@@ -668,7 +695,7 @@ class BTree(object):
             for pn in freepages:
                 self.fh.seek(pn*self.pagesize)
                 data = self.fh.read(self.pagesize)
-                print("%06x: free: %s" % (pn, binascii.b2a_hex(data[:64])))
+                print("%06x: free: %s" % (pn, hexdump(data[:64])))
             pn = nextfree
 
     def dumpindented(self, pn, indent=0):
@@ -727,12 +754,16 @@ class ID0File(object):
 
     nodeByName(name)  returns the nodeid for a name
     bytes(nodeid, tag, val)  returns the value for a specific node.
+
     """
     INDEX = 0
+
     def __init__(self, idb, fh):
         self.btree = BTree(fh)
 
-        if idb.magic == b'IDA2':
+        # todo: determine wordsize from value of '$ MAX LINK' / '$ MAX NODE'
+
+        if idb.magic == 'IDA2':
             # .i64 files use 64 bit values for some things.
             self.wordsize, self.fmt = 8, "Q"
             self.nodebase = 0xFF00000000000000
@@ -741,12 +772,52 @@ class ID0File(object):
             self.nodebase = 0xFF000000
 
         # set the keyformat for this database
-        self.keyfmt = ">B"+self.fmt+"s"+self.fmt
+        self.keyfmt = ">s"+self.fmt+"s"+self.fmt
+
+    def prettykey(self, key):
+        f = list(self.decodekey(key))
+        f[0] = f[0].decode('utf-8')
+        if len(f)>2 and type(f[2])==bytes:
+            f[2] = f[2].decode('utf-8')
+        
+        if f[0] == '.':
+            if len(f)==2:
+                return "%s%16x" % tuple(f)
+            elif len(f)==3:
+                return "%s%16x %s" % tuple(f)
+            elif len(f)==4:
+                if f[2]=='H' and type(f[3]) in (str,bytes):
+                    f[3] = f[3].decode('utf-8')
+                    return "%s%16x %s '%s'" % tuple(f)
+                elif  type(f[3]) in (int,long):
+                    return "%s%16x %s %x" % tuple(f)
+                else:
+                    f[3] = hexdump(f[3])
+                    return "%s%16x %s %s" % tuple(f)
+        elif f[0] in ( 'N', 'n', '$' ):
+            if type(f[1]) in (int, long):
+                return "%s %x %16x" % tuple(f)
+            else:
+                return "%s'%s'" % tuple(f)
+        elif f[0] == '-':
+            return "%s %x" % tuple(f)
+
+        return hexdump(key)
+
+    def prettyval(self, val):
+        if len(val)==self.wordsize and val[-1:] in (b'\x00', b'\xff'):
+            return "%x" % struct.unpack("<" + self.fmt, val)
+        if len(val)==self.wordsize and re.search(b'[\x00-\x08\x0b\x0c\x0e-\x1f]', val, re.DOTALL):
+            return "%x" % struct.unpack("<" + self.fmt, val)
+        if len(val)<2 or not re.match(b'^[\x09\x0a\x0d\x20-\xff]+.$', val, re.DOTALL):
+            return hexdump(val)
+        val = val.replace(b"\n", b"\\n")
+        return "'%s'" % val.decode('utf-8', 'ignore')
 
     def nodeByName(self, name):
         """ Return a nodeid by name """
         # note: really long names are encoded differently:
-        #  'N'+pack('Q', nameid)  => ofs
+        #  'N'+'\x00'+pack('Q', nameid)  => ofs
         #  and  (ofs, 'N') -> nameid
 
         # at nodebase ( 0xFF000000, 'S', 0x100*nameid )  there is a series of blobs for max 0x80000 sized names.
@@ -760,21 +831,32 @@ class ID0File(object):
             args = args[:1]+(args[1].encode('utf-8'),)+args[2:]
         if len(args)==3 and type(args[-1])==str:
             # node.tag.string type keys
-            return struct.pack(self.keyfmt[:1+len(args)], 0x2e, *args[:-1]) + args[-1].encode('utf-8')
+            return struct.pack(self.keyfmt[:1+len(args)], b'.', *args[:-1]) + args[-1].encode('utf-8')
         elif len(args)==3 and type(args[-1]) == type(-1) and args[-1]<0:
             # negative values -> need lowercase fmt char
-            return struct.pack(self.keyfmt[:1+len(args)] + self.fmt.lower(), 0x2e, *args)
+            return struct.pack(self.keyfmt[:1+len(args)] + self.fmt.lower(), b'.', *args)
         else:
             # node.tag.value type keys
-            return struct.pack(self.keyfmt[:2+len(args)], 0x2e, *args)
+            return struct.pack(self.keyfmt[:2+len(args)], b'.', *args)
 
     def decodekey(self, key):
+        if key[:1] in (b'n',b'N',b'$'):
+            if key[1:2] == b"\x00" and len(key)==2+self.wordsize:
+                return struct.unpack(">sB"+self.fmt,key)
+            else:
+                return key[:1], key[1:].decode('utf-8', 'ignore')
+        if key[:1] == b'-':
+            return struct.unpack(">s"+self.fmt, key)
         if len(key)==1+self.wordsize:
-            return struct.unpack(self.keyfmt[:2], key)
-        if len(key)==1+self.wordsize+1:
             return struct.unpack(self.keyfmt[:3], key)
-        if len(key)==1+2*self.wordsize+1:
+        if len(key)==1+self.wordsize+1:
             return struct.unpack(self.keyfmt[:4], key)
+        if len(key)==1+2*self.wordsize+1:
+            return struct.unpack(self.keyfmt[:5], key)
+        if len(key)>1+self.wordsize+1:
+            f = struct.unpack_from(self.keyfmt[:4], key)
+            return f +( key[2+self.wordsize:], )
+        raise Exception("unknown key format")
 
     def bytes(self, *args):
         """ return a raw value for the given arguments """
@@ -803,26 +885,39 @@ class ID0File(object):
                 return struct.unpack("<L", data)[0]
             if len(data)==8:
                 return struct.unpack("<Q", data)[0]
-            print("can't get int from %s" % binascii.b2a_hex(data))
+            print("can't get int from %s" % hexdump(data))
 
     def string(self, *args):
         """ return string stored in node """
         data = self.bytes(*args)
         if data is not None:
             return data.rstrip(b"\x00").decode('utf-8')
+    def name(self, id):
+        data = self.bytes(id, 'N')
+        if not data:
+            print("%x has no name" % id)
+            return
+        if data[:1] == b'\x00':
+            nameid, = struct.unpack_from(">"+self.fmt, data, 1)
+            nameblob = self.blob(self.nodebase, 'S', nameid*256, nameid*256+32)
+            return nameblob.rstrip(b"\x00").decode('utf-8')
+        return data.rstrip(b"\x00").decode('utf-8')
 
-    def nextkey(self, key):
-        """ increment key value by one """
-        return  key[:-1] +  struct.pack("B", struct.unpack_from("B", key, -1)[0]+1 )
+    def blob(self, nodeid, tag, start=0, end=0xFFFFFFFF):
+        """
+        Blobs are stored in sequential nodes
+        with increasing index values.
 
-    def blob(self, *args):
-        # some blobs are stored with an offset ( like big names )
-        #   in that case 'endkey' is currently wrong.
-        startkey = self.makekey(*args)
-        endkey = self.nextkey(startkey)
+        most blobs, like scripts start at index
+        0, long names start at a specified
+        offset.
+
+        """
+        startkey = self.makekey(nodeid, tag, start)
+        endkey = self.makekey(nodeid, tag, end)
         cur = self.btree.find('ge', startkey)
         data = b''
-        while cur.getkey() < endkey:
+        while cur.getkey() <= endkey:
             data += cur.getval()
             cur.next()
         return data
@@ -840,11 +935,11 @@ class ID1File(object):
     class SegInfo:
         def __init__(self, startea, endea, offset):
             self.startea = startea
-            self.endea   = endea
-            self.offset  = offset
+            self.endea = endea
+            self.offset = offset
 
     def __init__(self, idb, fh):
-        if idb.magic == b'IDA2':
+        if idb.magic == 'IDA2':
             wordsize, fmt = 8, "Q"
         else:
             wordsize, fmt = 4, "L"
@@ -856,7 +951,7 @@ class ID1File(object):
         fh.seek(0)
         hdrdata = fh.read(32)
         magic = hdrdata[:4]
-        if magic in (b'Va4\x00', b'Va3\x00', b'Va0\x00'):
+        if magic in (b'Va4\x00', b'Va3\x00', b'Va2\x00', b'Va1\x00', b'Va0\x00'):
             nsegments, npages = struct.unpack_from("<HH", hdrdata, 4)
             #  filesize / npages == 0x2000  for all cases
             seglistofs = 8
@@ -870,13 +965,13 @@ class ID1File(object):
             seglistofs = 20
             seginfosize = 2
         else:
-            raise Exception("unknown id1 magic: %s" % binascii.b2a_hex(magic))
+            raise Exception("unknown id1 magic: %s" % hexdump(magic))
 
         self.seglist = []
         # Va0  - ida v3.0.5
         # Va3  - ida v3.6
         fh.seek(seglistofs)
-        if magic in (b'Va4\x00', b'Va3\x00', b'Va0\x00'):
+        if magic in (b'Va4\x00', b'Va3\x00', b'Va2\x00', b'Va1\x00', b'Va0\x00'):
             segdata = fh.read(nsegments * 3 * wordsize)
             for o in range(nsegments):
                 startea, endea, id1ofs = struct.unpack_from("<"+fmt+fmt+fmt, segdata, o * seginfosize * wordsize)
@@ -930,18 +1025,22 @@ class ID1File(object):
                     return self.seglist[i+1].startea
                 else:
                     return
+
     def segStart(self, ea):
         seg = self.find_segment(ea)
         return seg.startea
+
     def segEnd(self, ea):
         seg = self.find_segment(ea)
         return seg.endea
 
+
 class NAMFile(object):
     """ reads .nam or NAMES.IDA files, containing ptrs to named items """
     INDEX = 2
+
     def __init__(self, idb, fh):
-        if idb.magic == b'IDA2':
+        if idb.magic == 'IDA2':
             wordsize, fmt = 8, "Q"
         else:
             wordsize, fmt = 4, "L"
@@ -952,7 +1051,7 @@ class NAMFile(object):
         magic = hdrdata[:4]
         # Va0  - ida v3.0.5
         # Va1  - ida v3.6
-        if magic in (b'Va4\x00', b'Va1\x00', b'Va0\x00'):
+        if magic in (b'Va4\x00', b'Va3\x00', b'Va2\x00', b'Va1\x00', b'Va0\x00'):
             always1, npages, always0, nnames, pagesize = struct.unpack_from("<HH"+fmt+fmt+"L", hdrdata, 4)
             if always1!=1: print("nam: first hw = %d" % always1)
             if always0!=0: print("nam: third dw = %d" % always0)
@@ -964,9 +1063,9 @@ class NAMFile(object):
             if always2k!=0x800: print("nam: 2k dw = %d" % always2k)
             pagesize = 0x2000
         else:
-            raise Exception("unknown nam magic: %s" % binascii.b2a_hex(magic))
-        if idb.magic == b'IDA2':
-            nnames /= 2
+            raise Exception("unknown nam magic: %s" % hexdump(magic))
+        if idb.magic == 'IDA2':
+            nnames >>= 1
         self.wordsize = wordsize
         self.wordfmt = fmt
         self.nnames = nnames
@@ -975,31 +1074,35 @@ class NAMFile(object):
 
     def dump(self):
         pass
+
     def allnames(self):
         self.fh.seek(self.pagesize)
         n = 0
         while n<self.nnames:
             data = self.fh.read(self.pagesize)
             want = min(self.nnames-n, int(self.pagesize/self.wordsize))
-            ofs = struct.unpack_from("<" + self.wordfmt*want, data, 0)
-            for ea in ofs:
+            ofslist = struct.unpack_from("<%d%s" % (want, self.wordfmt), data, 0)
+            for ea in ofslist:
                 yield ea
             n += want
-
 
 
 class SEGFile(object):
     """ reads .seg or $SEGS.IDA files.  """
     INDEX = 3
+
     def __init__(self, idb, fh):
         pass
+
 
 class TILFile(object):
     """ reads .til files """
     INDEX = 4
+
     def __init__(self, idb, fh):
         pass
-# note: v3 databases had a .reg instead of .til 
+# note: v3 databases had a .reg instead of .til
+
 
 class ID2File(object):
     """ reads .id2 files """
@@ -1008,4 +1111,3 @@ class ID2File(object):
     # contains 'packed' data ( like struct information )
     def __init__(self, idb, fh):
         pass
-
