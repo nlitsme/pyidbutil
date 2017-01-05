@@ -20,7 +20,8 @@ import struct
 import binascii
 import argparse
 import itertools
-import traceback
+
+import re
 
 from datetime import datetime
 
@@ -36,18 +37,18 @@ def idaunpack(buf):
 
     def nextval(o):
         val = buf[o] ; o += 1
-        if val==0xff:
-            # 32 bit value
-            # todo: figure out if this works the same for .i64 files
+        if val==0xff: # 32 bit value
             val, = struct.unpack_from("<L", buf, o)
             o += 4
             return val, o
-        if val<0x80:
+        if val<0x80:  # 8 bit value
             return val, o
         val <<= 8
         val |= buf[o] ; o += 1
-        if val<0xc000:
+        if val<0xc000: # 15 bit value
             return val&0x7fff, o
+
+        # 30 bit value
         val <<= 8
         val |= buf[o] ; o += 1
         val <<= 8
@@ -97,7 +98,7 @@ def licensestring(lic):
     if len(lic)!=127:
         print("unknown license format: %s" % hexdump(lic))
         return
-    if struct.unpack_from("<L", lic, -20)[0]:
+    if struct.unpack_from("<L", lic, 106)[0]:
         print("unknown license format: %s" % hexdump(lic))
         return
 
@@ -105,6 +106,9 @@ def licensestring(lic):
 
     licver, = struct.unpack_from("<H", lic, 2)
     if licver==0:
+
+        # todo: new 'Evaluation version'  has licver==0 as well, but is new format anyway
+
         # up to ida v5.2
         time, = struct.unpack_from("<L", lic, 4)
         # then 8 zero bytes
@@ -126,8 +130,12 @@ def dumpuser(id0):
     orignode = id0.nodeByName('$ original user')
     if orignode:
         user0 = id0.bytes(orignode, 'S', 0)
+        if user0.find(b'\x00\x00\x00\x00')>=128:
+            user0 = decryptuser(user0)
+        else:
+            user0 = user0[:127]
         # user0 has 128 bytes rsa encrypted license, followed by 32 bytes zero
-        print("orig: %s" % licensestring(decryptuser(user0)))
+        print("orig: %s" % licensestring(user0))
     curnode = id0.nodeByName('$ user1')
     if curnode:
         user1 = id0.bytes(curnode, 'S', 0)
@@ -246,17 +254,6 @@ def dumpscript(id0, node):
 
     print("======= %s %s =======" % (lang, name))
     print(body)
-
-
-def hexdump(x):
-    if x is None:
-        return None
-
-    if sys.version_info[0] == 2:
-        return " ".join("%02x" % ord(_) for _ in x)
-    else:
-        return " ".join("%02x" % _ for _ in x)
-
 
 def dumpstructmember(id0, spec):
     def i64(a,b): return a + (b<<32)
@@ -393,16 +390,87 @@ def printent(args, id0, c):
         print("%s = %s" % (id0.prettykey(c.getkey()), id0.prettyval(c.getval())))
     else:
         print("%s = %s" % (hexdump(c.getkey()), hexdump(c.getval())))
+
+def id0query(args, id0, query):
+    """
+    queries start with an optional operator: <,<=,>,>=,==
+
+    followed by either a name or address or nodeid
+
+    Addresses are specified as a sequence of hexadecimal charaters.
+    Nodeid's may be specified either as the full node id, starting with ff00,
+    or starting with a '_'
+    Names are anything which can be found under the name tree in the database.
+    
+    after the name/addr/node there is optionally a slash, followed by a node tag,
+    and another slash, followed by a index or hash string.
+
+    """
+
+    xlatop = { '=':'eq', '==':'eq', '>':'gt', '<':'lt', '>=':'ge', '<=':'le' }
+
+    m = re.match(r'^([=<>]=?)?(.+?)(?:/(\w+)(?:/(.+))?)?$', query)
+    op = m.group(1) or "=="
+    base = m.group(2)
+    tag = m.group(3)
+    ix = m.group(4)
+
+    op = xlatop[op]
+
+    if base[:1] == '_':
+        nodeid = int(base[1:], 16) + id0.nodebase
+    elif re.match(r'^[0-9a-fA-F]+$', base):
+        nodeid = int(base, 16)
+    else:
+        nodeid = id0.nodeByName(base)
+        if args.verbose > 1:
+            print("found node %x for %s" % (nodeid, base))
+    if nodeid is None:
+        print("Could not find '%s'" % base)
+        return
+
+    s = [ nodeid ]
+    if tag is not None:
+        s.append(tag)
+        if ix is not None:
+            try:
+                ix = int(ix, 0)
+            except:
+                pass
+            s.append(ix)
+
+    limit = args.limit
+
+    c = id0.btree.find(op, id0.makekey(*s))
+    while c and not c.eof() and (limit is None or limit>0):
+        printent(args, id0, c)
+        if args.dec:
+            c.prev()
+        else:
+            c.next()
+        if limit is not None:
+            limit -= 1
+        elif op == 'eq':
+            break
+
+
+
 def processid0(args, id0):
 
-    if args.id0:
+    if args.pagedump:
+        id0.btree.pagedump()
+
+    if args.query:
+        for query in args.query:
+            id0query(args, id0, query)
+    elif args.id0:
         id0.btree.dump()
-    if args.inc:
+    elif args.inc:
         c = id0.btree.find('ge', b'')
         while not c.eof():
             printent(args, id0, c)
             c.next()
-    if args.dec:
+    elif args.dec:
         c = id0.btree.find('le', b'\x80')
         while not c.eof():
             printent(args, id0, c)
@@ -410,6 +478,7 @@ def processid0(args, id0):
 
     if args.info:
         dumpinfo(id0)
+
 
 
 def processid1(args, id1):
@@ -434,8 +503,8 @@ def processseg(args, seg):
 
 
 def processidb(args, idb):
-    print("magic=%s, filever=%d" % (idb.magic, idb.fileversion))
-    if args.verbose:
+    if args.verbose > 1:
+        print("magic=%s, filever=%d" % (idb.magic, idb.fileversion))
         for i in range(6):
             comp, ofs, size, checksum = idb.getsectioninfo(i)
             if ofs:
@@ -469,8 +538,10 @@ def processfile(args, filetypehint, fh):
         def __init__(idb, args):
             if args.i64:
                 idb.magic = 'IDA2'
-            else:
+            elif args.i32:
                 idb.magic = 'IDA1'
+            else:
+                idb.magic = None
 
     try:
         magic = fh.read(64)
@@ -571,15 +642,37 @@ def xlatv2name(name):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='idbtool - print info from hex-rays IDA .idb and .i64 files',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
                 epilog="""
 idbtool can process complete .idb and .i64 files, but also naked .id0, .id1, .nam, .til files.
 All versions since IDA v2.0 are supported.
+
+Queries start with an optional operator: <,<=,>,>=,==.
+Followed by either a name or address or nodeid.
+Addresses are specified as a sequence of hexadecimal charaters.
+Nodeid's may be specified either as the full node id, starting with ff00,
+or starting with a '_'.
+Names are anything which can be found under the name tree in the database.
+
+After the name/addr/node there is optionally a slash, followed by a node tag,
+and another slash, followed by a index or hash string.
+
+Multiple queries can be specified, terminated by another option, or `--`.
+Add `-v` for pretty printed keys and values.
+
+Examples:
+
+  idbtool -v --query "$ user1/S/0" -- x.idb
+  idbtool -v --limit 4 --query ">_000a" -- x.idb
+  idbtool -v --limit 5 --query ">Root Node/S/0" -- x.idb
+  idbtool -v --limit 10 --query ">Root Node/S" -- x.idb
 """)
-    parser.add_argument('--verbose', '-v', action='count')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
     parser.add_argument('--skiplinks', '-L', action='store_true', help='skip symbolic links')
     parser.add_argument('--filetype', '-t', type=str, help='specify filetype when loading `naked` id1,nam or seg files')
     parser.add_argument('--i64', '-i64', action='store_true', help='specify that `naked` file is from a 64 bit database')
+    parser.add_argument('--i32', '-i32', action='store_true', help='specify that `naked` file is from a 32 bit database')
 
     parser.add_argument('--names', '-n', action='store_true', help='print names')
     parser.add_argument('--scripts', '-s', action='store_true', help='print scripts')
@@ -590,13 +683,20 @@ All versions since IDA v2.0 are supported.
     parser.add_argument('--info', '-i', action='store_true', help='database info')
     parser.add_argument('--inc',  action='store_true', help='dump id0 records by cursor increment')
     parser.add_argument('--dec',  action='store_true', help='dump id0 records by cursor decrement')
-    parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records')
+    parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records, by walking the page tree')
     parser.add_argument('--id1', "-id1", action='store_true', help='dump id1 records')
+    parser.add_argument('--pagedump', "-d", action='store_true', help='dump all btree pages, including any that might have become inaccessible due to datacorruption.')
+
+    parser.add_argument('--query', "-q", type=str, nargs='*', help='search the id0 file for a specific record.')
+    parser.add_argument('--limit', type=int, help='Max nr of records to return for a query.')
 
     parser.add_argument('--recover', action='store_true', help='recover idb from unpacked files, of v2 database')
     parser.add_argument('--debug', action='store_true')
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files')
+
+
+
     args = parser.parse_args()
 
     if args.FILES:
@@ -634,6 +734,7 @@ All versions since IDA v2.0 are supported.
                     except Exception as e:
                         print("ERROR: %s" % e)
     else:
+        print("==> STDIN <==")
         processfile(args, args.filetype, sys.stdin.buffer)
 
 
