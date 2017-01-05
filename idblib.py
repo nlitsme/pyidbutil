@@ -126,7 +126,6 @@ class CompressedStream(object):
         self.curpos = 0
 
     def read(self, size):
-        # todo
         return b""
 
     def seek(self, offset, *args):
@@ -225,7 +224,15 @@ class IDBFile(object):
 
         fh = FileSection(self.fh, ofs, ofs+size)
         if comp==2:
-            fh = CompressedStream(fh)
+            # todo - create more efficient object than decompressing the entire file in memory.
+            #fh = CompressedStream(fh)
+            import zlib
+            if sys.version_info[0] == 2:
+                from StringIO import StringIO
+                fh = StringIO(zlib.decompress(fh.read(size)))
+            else:
+                from io import BytesIO
+                fh = BytesIO(zlib.decompress(fh.read(size)))
         elif comp==0:
             pass
         else:
@@ -363,6 +370,10 @@ class BaseIndexEntry(object):
     """
     def __init__(self, data):
         ofs = self.recofs
+        if self.recofs<6:
+            self.val = self.key = None
+            return
+
         keylen, = struct.unpack_from("<H", data, ofs) ; ofs += 2
         self.key = data[ofs:ofs+keylen]  ; ofs += keylen
         vallen, = struct.unpack_from("<H", data, ofs) ; ofs += 2
@@ -599,17 +610,14 @@ class BTree(object):
             self.parseheader15(data)
             self.page = self.Page15
             self.version = 15
-            print("btree v1.5")
         elif data[19:].startswith(b"B-tree v 1.6 (C) Pol 1990"):
             self.parseheader16(data)
             self.page = self.Page16
             self.version = 16
-            print("btree v1.6")
         elif data[19:].startswith(b"B-tree v2"):
             self.parseheader16(data)
             self.page = self.Page20
             self.version = 20
-            print("btree v2.0")
         else:
             print("unknown btree: %s" % hexdump(data))
             raise Exception("unknown b-tree")
@@ -726,6 +734,29 @@ class BTree(object):
             for ent in page.index:
                 self.dumptree(ent.page)
 
+    def pagedump(self):
+        self.fh.seek(self.pagesize)
+        pn = 1
+        while True:
+            try:
+                pagedata = self.fh.read(self.pagesize)
+                if len(pagedata)==0:
+                    break
+                elif len(pagedata)!=self.pagesize:
+                    print("%06x: incomplete - %d bytes ( pagesize = %d )" % (pn, len(pagedata), self.pagesize))
+                    break
+                elif pagedata == b'\x00' * self.pagesize:
+                    print("%06x: empty" % (pn))
+                else:
+                    page = self.page(pagedata)
+
+                    print("%06x: preceeding = %06x, reccount = %04x" % (pn, page.preceeding, page.count))
+                    for ent in page.index:
+                        print("    %s" % ent)
+            except Exception as e:
+                print("%06x: ERROR decoding as B-tree page: %s" % (pn, e))
+            pn += 1
+
 
 class ID0File(object):
     """
@@ -761,15 +792,30 @@ class ID0File(object):
     def __init__(self, idb, fh):
         self.btree = BTree(fh)
 
-        # todo: determine wordsize from value of '$ MAX LINK' / '$ MAX NODE'
+
+        self.wordsize = None
 
         if idb.magic == 'IDA2':
             # .i64 files use 64 bit values for some things.
-            self.wordsize, self.fmt = 8, "Q"
-            self.nodebase = 0xFF00000000000000
+            self.wordsize = 8
+        elif idb.magic in ('IDA0', 'IDA1'):
+            self.wordsize = 4
         else:
-            self.wordsize, self.fmt = 4, "L"
+            # determine wordsize from value of '$ MAX NODE'
+            c = self.btree.find('eq', b'$ MAX NODE')
+            if c and not c.eof():
+                self.wordsize = len(c.getval())
+
+        if self.wordsize not in (4, 8):
+            print("Can not determine wordsize for database - assuming 32 bit")
+            self.wordsize = 4
+
+        if self.wordsize == 4:
             self.nodebase = 0xFF000000
+            self.fmt = "L"
+        else:
+            self.nodebase = 0xFF00000000000000
+            self.fmt = "Q"
 
         # set the keyformat for this database
         self.keyfmt = ">s"+self.fmt+"s"+self.fmt
@@ -1070,10 +1116,9 @@ class NAMFile(object):
         self.wordfmt = fmt
         self.nnames = nnames
         self.pagesize = pagesize
-        print("nam: nnames=%d, npages=%d, pagesize=%08x" % (nnames, npages, pagesize))
 
     def dump(self):
-        pass
+        print("nam: nnames=%d, npages=%d, pagesize=%08x" % (nnames, npages, pagesize))
 
     def allnames(self):
         self.fh.seek(self.pagesize)
