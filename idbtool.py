@@ -28,41 +28,6 @@ from datetime import datetime
 import idblib
 from idblib import hexdump
 
-######### ida value packing ######### 
-
-
-def idaunpack(buf):
-    """ special data packing format, used in struct definitions, and .id2 files """
-    buf = bytearray(buf)
-
-    def nextval(o):
-        val = buf[o] ; o += 1
-        if val==0xff: # 32 bit value
-            val, = struct.unpack_from("<L", buf, o)
-            o += 4
-            return val, o
-        if val<0x80:  # 8 bit value
-            return val, o
-        val <<= 8
-        val |= buf[o] ; o += 1
-        if val<0xc000: # 15 bit value
-            return val&0x7fff, o
-
-        # 30 bit value
-        val <<= 8
-        val |= buf[o] ; o += 1
-        val <<= 8
-        val |= buf[o] ; o += 1
-        return val&0x3fffffff, o
-
-    values = []
-    o = 0
-    while o < len(buf):
-        val, o = nextval(o)
-        values.append(val)
-    return values
-
-
 def timestring(t):
     if t==0:
         return "....-..-.. ..:..:.."
@@ -95,6 +60,8 @@ def decryptuser(data):
 
 def licensestring(lic):
     """ decode a license blob """
+    if not lic:
+        return
     if len(lic)!=127:
         print("unknown license format: %s" % hexdump(lic))
         return
@@ -218,6 +185,9 @@ def dumpinfo(id0):
         print("loader: %s %s" % (id0.string(ldr, 'S', 0), id0.string(ldr, 'S', 1)))
 
     root = id0.nodeByName("Root Node")
+    if not root:
+        print("database has no RootNode")
+        return
 
     params = id0.bytes(root, 'S', 0x41b994)
     if params:
@@ -298,7 +268,9 @@ def dumpstruct(id0, node):
     """ dump all info for the struct defined by `node` """
     name = id0.name(node)
     packed = id0.blob(node, 'M')
-    spec = idaunpack(packed)
+    spec = idblib.idaunpack(packed)
+
+    # todo: old idb databases did not have a flags element., so len == 1 + entsize*spec[0]
 
     entsize = 5 if id0.wordsize==4 else 8
 
@@ -423,7 +395,7 @@ def id0query(args, id0, query):
         nodeid = int(base, 16)
     else:
         nodeid = id0.nodeByName(base)
-        if args.verbose > 1:
+        if nodeid and args.verbose > 1:
             print("found node %x for %s" % (nodeid, base))
     if nodeid is None:
         print("Could not find '%s'" % base)
@@ -624,7 +596,7 @@ def isv2name(name):
 
 
 def isv3ext(ext):
-    return ext.lower() in ('id0', 'id1', 'id2', 'nam', 'til')
+    return ext.lower() in ('.id0', '.id1', '.id2', '.nam', '.til')
 
 
 def xlatv2name(name):
