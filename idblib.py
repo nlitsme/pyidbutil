@@ -9,11 +9,51 @@ IDA v3.x  databases are bundled into .idb files
 
 Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
 
+
+An IDB file can contain up to 6 sections:
+    id0  the main database
+    id1  contains flags for each byte - what is returned by idc.GetFlags(ea)
+    nam  contains a list of addresses of named items
+    seg  .. only in older databases
+    til  type info
+    id2  ?
+    
+The id0 database is a simple key/value database, much like leveldb
+
+types of records:
+
+Some bookkeeping:
+
+    "$ MAX NODE" -> the highest numbered node value in use.
+
+A list of names:
+
+    "N" + name  -> the node id for that name.
+
+names are both user/disassembler symbols assigned to addresses
+in the disassembled code, and IDA internals, like lists of items,
+For example: '$ structs', or 'Root Node'.
+
+The main part:
+
+    "." + nodeid + tag + index  
+
+This maps directly onto the idasdk netnode interface.
+The size of the nodeid and index is 32bits for .idb files and 64 bits for .i64 files.
+The nodeid and index are encoded as bigendian numbers in the key, and as little endian
+numbers in (most of) the values.
+
+
 """
 from __future__ import division, print_function, absolute_import, unicode_literals
 import struct
 import binascii
 import re
+
+#############################################################################
+# some code to make this library run with both python2 and python3
+#############################################################################
+
 import sys
 if sys.version_info[0] == 3:
     long = int
@@ -26,6 +66,18 @@ except:
     # python3 does not have cmp
     def cmp(a,b): return (a>b)-(a<b)
 
+def makeStringIO(data):
+    if sys.version_info[0] == 2:
+        from StringIO import StringIO
+        return StringIO(data)
+    else:
+        from io import BytesIO
+        return BytesIO(data)
+
+
+#############################################################################
+# some utility functions
+#############################################################################
 
 def nonefmt(fmt, item):
     # helper for outputting None without raising an error
@@ -36,6 +88,7 @@ def nonefmt(fmt, item):
 def hexdump(data):
     return binascii.b2a_hex(data).decode('utf-8')
 
+#############################################################################
 
 class FileSection(object):
     """
@@ -55,8 +108,11 @@ class FileSection(object):
         self.curpos = 0
         self.fh.seek(self.start)
 
-    def read(self, size):
-        want = min(size, self.end-self.start - self.curpos)
+    def read(self, size=None):
+        want = self.end-self.start - self.curpos
+        if size is not None and want>size:
+            want = size
+
         if want<=0:
             return b""
 
@@ -97,62 +153,76 @@ import unittest
 class TestFileSection(unittest.TestCase):
     """ unittest for FileSection object """
     def test_file(self):
-        import StringIO
-        s = StringIO.StringIO("0123456789abcdef")
+        s = makeStringIO(b"0123456789abcdef")
         fh = FileSection(s, 3, 11)
-        self.assertEqual(fh.read(3), "345")
-        self.assertEqual(fh.read(8), "6789a")
-        self.assertEqual(fh.read(8), "")
+        self.assertEqual(fh.read(3), b"345")
+        self.assertEqual(fh.read(8), b"6789a")
+        self.assertEqual(fh.read(8), b"")
 
         fh.seek(-1,2)
-        self.assertEqual(fh.read(8), "a")
+        self.assertEqual(fh.read(8), b"a")
         fh.seek(3)
-        self.assertEqual(fh.read(2), "67")
+        self.assertEqual(fh.read(2), b"67")
         fh.seek(-2,1)
-        self.assertEqual(fh.read(2), "67")
+        self.assertEqual(fh.read(2), b"67")
         fh.seek(2,1)
-        self.assertEqual(fh.read(2), "a")
+        self.assertEqual(fh.read(2), b"a")
 
         fh.seek(8)
-        self.assertEqual(fh.read(1), "")
+        self.assertEqual(fh.read(1), b"")
         with self.assertRaises(Exception):
             fh.seek(9)
 
 
-class CompressedStream(object):
-    # todo: random access to compressed stream - see zran.c
-    def __init__(self, fh):
-        self.fh = fh
-        self.curpos = 0
+######### ida value packing ######### 
+def idaunpack(buf):
+    """ special data packing format, used in struct definitions, and .id2 files """
+    buf = bytearray(buf)
 
-    def read(self, size):
-        return b""
+    def nextval(o):
+        val = buf[o] ; o += 1
+        if val==0xff: # 32 bit value
+            val, = struct.unpack_from("<L", buf, o)
+            o += 4
+            return val, o
+        if val<0x80:  # 8 bit value
+            return val, o
+        val <<= 8
+        val |= buf[o] ; o += 1
+        if val<0xc000: # 15 bit value
+            return val&0x7fff, o
 
-    def seek(self, offset, *args):
+        # 30 bit value
+        val <<= 8
+        val |= buf[o] ; o += 1
+        val <<= 8
+        val |= buf[o] ; o += 1
+        return val&0x3fffffff, o
 
-        if len(args)==0:
-            whence = 0
-        else:
-            whence = args[0]
-        if whence==0:
-            self.curpos = offset
-        elif whence==1:
-            self.curpos += offset
-        elif whence==2:
-            self.curpos = self.end - self.start + offset
-
-    def tell(self):
-        return self.curpos
+    values = []
+    o = 0
+    while o < len(buf):
+        val, o = nextval(o)
+        values.append(val)
+    return values
 
 
 class IDBFile(object):
     """
-    Provide access to the various parts of an .idb file.
+    Provide access to the various sections in an .idb file.
 
     Usage:
 
     idb = IDBFile(fhandle)
     id0 = idb.getsection(ID0File)
+
+    ID0File is expected to have a class property 'INDEX'
+
+# v1..v5  id1 and nam files start with 'Va0' .. 'Va4'
+# v6      id1 and nam files start with 'VA*'
+# til files start with 'IDATIL'
+# id2 files start with 'IDAS\x1d\xa5\x55\x55'
+
     """
     def __init__(self, fh):
         """ constructor takes a filehandle """
@@ -194,7 +264,13 @@ class IDBFile(object):
 
     def getsectioninfo(self, i):
         """
-        Returns section parameters by index.
+        Returns a tuple with section parameters by index.
+
+        The parameteres are:
+         * compression flag
+         * data offset
+         * data size
+         * data checksum
 
         Sections are stored in a fixed order: id0, id1, nam, seg, til, id2
         """
@@ -216,6 +292,9 @@ class IDBFile(object):
     def getpart(self, ix):
         """
         Returns a fileobject for the specified section.
+
+        This method optionally decompresses the data found in the .idb file,
+        and returns a file-like object, with seek, read, tell.
         """
         if self.offsets[ix]==0:
             return
@@ -227,12 +306,10 @@ class IDBFile(object):
             # todo - create more efficient object than decompressing the entire file in memory.
             #fh = CompressedStream(fh)
             import zlib
-            if sys.version_info[0] == 2:
-                from StringIO import StringIO
-                fh = StringIO(zlib.decompress(fh.read(size)))
-            else:
-                from io import BytesIO
-                fh = BytesIO(zlib.decompress(fh.read(size)))
+            # very old databases used a different compression scheme:
+            wbits = -15 if self.magic == 'IDA0' else 15
+
+            fh = makeStringIO(zlib.decompress(fh.read(size), wbits))
         elif comp==0:
             pass
         else:
@@ -252,7 +329,7 @@ class RecoverIDBFile:
 
     This is useful for opening  IDAv2.x databases, or for recovering data from unclosed databases.
     """
-    id2ext = [ 'id0', 'id1', 'nam', 'seg', 'til', 'id2' ]
+    id2ext = [ '.id0', '.id1', '.nam', '.seg', '.til', '.id2' ]
 
     def __init__(self, args, basepath, dbfiles):
         if args.i64:
@@ -285,13 +362,14 @@ class RecoverIDBFile:
         if part:
             return cls(self, part)
 
-# v1..v5  id1 and nam files start with 'Va4'
-# v6      id1 and nam files start with 'VA*'
-# til files start with 'IDATIL'
-# id2 files start with 'IDAS\x1d\xa5\x55\x55'
-
 def binary_search(a, k):
-    """ like c++: a.upperbound(k)-- """
+    """
+    Do a binary search in an array of objects ordered by '.key'
+
+    returns the largest index for which:  a[i].key <= k
+
+    like c++: a.upperbound(k)--
+    """
     first, last = 0, len(a)
     while first<last:
         mid = (first+last)>>1
@@ -357,7 +435,25 @@ class TestBinarySearch(unittest.TestCase):
             self.assertEqual(binary_search(lst, l+1), l-2)
             self.assertEqual(binary_search(lst, l+2), l-2)
 
+"""
+################################################################################
 
+I would have liked to make these classes a nested class of BTree, but
+the problem is than there is no way for a nested-nested class
+of BTree to refer back to a toplevel nested class of BTree.
+So moving these outside of BTree so i can use them as baseclasses
+in the various page implementations
+
+class BTree:
+    class BaseEntry(object): pass
+    class BasePage(object): pass
+    class Page15(BasePage):
+        class Entry(BTree.BaseEntry):
+            pass
+
+>>> NameError: name 'BTree' is not defined
+
+"""
 class BaseIndexEntry(object):
     """
     Baseclass for Index Entries.
@@ -365,12 +461,11 @@ class BaseIndexEntry(object):
     Index entries have a key + value, and a page containing keys larger than that key
     in this index entry.
 
-    ###### moving these outside of BTree
-    ###### so i can use them as baseclasses in the various page implementations
     """
     def __init__(self, data):
         ofs = self.recofs
         if self.recofs<6:
+            # reading an invalid page... 
             self.val = self.key = None
             return
 
@@ -404,7 +499,7 @@ class BaseLeafEntry(BaseIndexEntry):
 class BTree(object):
     """
     BTree is the IDA main database engine.
-    It provides allows the user to do a binary search for records with
+    It allows the user to do a binary search for records with
     a specified key relation ( >, <, ==, >=, <= )
     """
     class BasePage(object):
@@ -478,6 +573,9 @@ class BTree(object):
         def __repr__(self):
             return ("leaf" if self.isleaf() else ("index<%d>" % self.preceeding))+repr(self.index)
 
+    ######################################################
+    # Page objects for the various versions of the database
+    ######################################################
     class Page15(BasePage):
         """ v1.5 b-tree page """
         class IndexEntry(BaseIndexEntry):
@@ -626,6 +724,7 @@ class BTree(object):
         self.firstfree, self.pagesize, self.firstindex, self.reccount, self.pagecount = struct.unpack_from("<HHHLH", data, 0)
 
     def parseheader16(self, data):
+        # v16 and v20 both have the same header format
         self.firstfree, self.pagesize, self.firstindex, self.reccount, self.pagecount = struct.unpack_from("<LHLLL", data, 0)
 
     def readpage(self, nr):
@@ -650,13 +749,15 @@ class BTree(object):
         # descend tree to leaf nearest to the `key`
         page = self.readpage(self.firstindex)
         stack = []
-        while True:
+        while len(stack)<256:
             act, ix = page.find(key)
             stack.append((page, ix))
             if act!='recurse':
                 break
             page = self.readpage(page.getpage(ix))
 
+        if len(stack)==256:
+            raise Exception("b-tree corrupted")
         cursor = BTree.Cursor(self, stack)
 
         # now correct for what was actually asked.
@@ -735,6 +836,11 @@ class BTree(object):
                 self.dumptree(ent.page)
 
     def pagedump(self):
+        """
+        dump the contents of all pages, ignoring links between pages,
+        this will enable you to view contents of pages which have become
+        lost due to datacorruption.
+        """
         self.fh.seek(self.pagesize)
         pn = 1
         while True:
@@ -821,6 +927,9 @@ class ID0File(object):
         self.keyfmt = ">s"+self.fmt+"s"+self.fmt
 
     def prettykey(self, key):
+        """
+        todo
+        """
         f = list(self.decodekey(key))
         f[0] = f[0].decode('utf-8')
         if len(f)>2 and type(f[2])==bytes:
@@ -851,6 +960,9 @@ class ID0File(object):
         return hexdump(key)
 
     def prettyval(self, val):
+        """
+        todo
+        """
         if len(val)==self.wordsize and val[-1:] in (b'\x00', b'\xff'):
             return "%x" % struct.unpack("<" + self.fmt, val)
         if len(val)==self.wordsize and re.search(b'[\x00-\x08\x0b\x0c\x0e-\x1f]', val, re.DOTALL):
@@ -886,6 +998,9 @@ class ID0File(object):
             return struct.pack(self.keyfmt[:2+len(args)], b'.', *args)
 
     def decodekey(self, key):
+        """
+        todo
+        """
         if key[:1] in (b'n',b'N',b'$'):
             if key[1:2] == b"\x00" and len(key)==2+self.wordsize:
                 return struct.unpack(">sB"+self.fmt,key)
@@ -939,6 +1054,9 @@ class ID0File(object):
         if data is not None:
             return data.rstrip(b"\x00").decode('utf-8')
     def name(self, id):
+        """
+        todo
+        """
         data = self.bytes(id, 'N')
         if not data:
             print("%x has no name" % id)
@@ -979,6 +1097,9 @@ class ID1File(object):
     INDEX = 1
 
     class SegInfo:
+        """
+        todo
+        """
         def __init__(self, startea, endea, offset):
             self.startea = startea
             self.endea = endea
@@ -1155,4 +1276,8 @@ class ID2File(object):
 
     # contains 'packed' data ( like struct information )
     def __init__(self, idb, fh):
+        if not fh:
+            return
+        data = fh.read()
+        print(idaunpack(data))
         pass
