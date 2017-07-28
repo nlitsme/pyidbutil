@@ -344,6 +344,17 @@ def printent(args, id0, c):
 
 
 def createkey(args, id0, base, tag, ix):
+    """
+
+    parse base node specification:
+
+    '?<name>' -> explicit N<name> key
+    '#<number>' -> relative to nodebase
+    '.<number>' -> absolute nodeid
+
+    '<name>'  -> lookup by name.
+
+    """
     if base[:1] == '?':
         return id0.namekey(base[1:])
 
@@ -370,6 +381,26 @@ def createkey(args, id0, base, tag, ix):
             s.append(ix)
 
     return id0.makekey(*s)
+
+
+def enumeratecursor(id0, args, c, onerec):
+    """
+    Enumerate cursor in direction specified by `--dec` or `--inc`,
+    taking into account the optional limit set by `--limit`
+
+    Output according to verbosity level set by `--verbose`.
+    """
+    limit = args.limit
+    while c and not c.eof() and (limit is None or limit > 0):
+        printent(args, id0, c)
+        if args.dec:
+            c.prev()
+        else:
+            c.next()
+        if limit is not None:
+            limit -= 1
+        elif onerec:
+            break
 
 
 def id0query(args, id0, query):
@@ -399,19 +430,9 @@ def id0query(args, id0, query):
 
     op = xlatop[op]
 
-    limit = args.limit
-
     c = id0.btree.find(op, createkey(args, id0, base, tag, ix))
-    while c and not c.eof() and (limit is None or limit > 0):
-        printent(args, id0, c)
-        if args.dec:
-            c.prev()
-        else:
-            c.next()
-        if limit is not None:
-            limit -= 1
-        elif op == 'eq':
-            break
+
+    enumeratecursor(id0, args, c, op=='eq')
 
 
 def processid0(args, id0):
@@ -426,14 +447,10 @@ def processid0(args, id0):
         id0.btree.dump()
     elif args.inc:
         c = id0.btree.find('ge', b'')
-        while not c.eof():
-            printent(args, id0, c)
-            c.next()
+        enumeratecursor(id0, args, c, False)
     elif args.dec:
         c = id0.btree.find('le', b'\x80')
-        while not c.eof():
-            printent(args, id0, c)
-            c.prev()
+        enumeratecursor(id0, args, c, False)
 
     if args.info:
         dumpinfo(id0)
@@ -624,10 +641,10 @@ Add `-v` for pretty printed keys and values.
 Examples:
 
   idbtool -v --query "$ user1;S;0" -- x.idb
-  idbtool -v --limit 4 --query ">_000a" -- x.idb
+  idbtool -v --limit 4 --query ">#0xa" -- x.idb
   idbtool -v --limit 5 --query ">Root Node;S;0" -- x.idb
   idbtool -v --limit 10 --query ">Root Node;S" -- x.idb
-  idbtool -v --query "ff000001;N" -- x.idb
+  idbtool -v --query ".0xff000001;N" -- x.idb
 """)
     parser.add_argument('--verbose', '-v', action='count', default=0)
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
