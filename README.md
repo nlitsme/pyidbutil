@@ -71,6 +71,20 @@ example queries:
  * `.0xff000001;N` -> prints the rootnode name entry.
  * `#1;N` -> prints the rootnode name entry.
 
+List the highest node and following record in the database in two different ways,
+the first: starting at the first record below `ffc00000`, and listing the next.
+The second: starting at the first record after `ffc00000`, and listing the previous:
+ * `--query "<#0xc00000"  --limit 2 --inc -v`
+ * `--query ">#0xc00000"  --limit 2 --dec -v`
+
+Note that this should be the nodeid in the `$ MAX NODE` record.
+
+List the last two records:
+ * `--limit 2 --dec  -v`
+
+List the first two records, the `$ MAX LINK` and `$ MAX NODE` records:
+ * `--limit 2 --inc -v`
+
 
 A full database dump
 --------------------
@@ -79,9 +93,9 @@ Several methods exist for printing all records in the database. This may be usef
 you want to investigate more of IDA''s internals. But can also be useful in recovering
 data from corrupted databases.
 
- * `--inc`, `--dec` can be used to enumerate all b-tree nodes in either forward, or backward direction.
+ * `--inc`, `--dec` can be used to enumerate all b-tree records in either forward, or backward direction.
     * add `-v` to get a prettier key/value output
- * `--id0`  walks the page tree, instead of the node tree, printing the contents of each page
+ * `--id0`  walks the page tree, instead of the record tree, printing the contents of each page
  * `--pagedump` linearly skip through the file, this will also reveal information in deleted pages.
 
 naked files
