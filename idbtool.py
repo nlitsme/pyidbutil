@@ -259,7 +259,11 @@ def dumpstruct(id0, node):
     """ dump all info for the struct defined by `node` """
     name = id0.name(node)
     packed = id0.blob(node, 'M')
-    spec = idblib.idaunpack(packed)
+    try:
+        spec = idblib.idaunpack(packed)
+    except IndexError:
+        print("struct '%s' has corrupted M (data) node: %s" % (name, binascii.b2a_hex(packed)))
+        return
 
     # todo: old idb databases did not have a flags element., so len == 1 + entsize*spec[0]
 
