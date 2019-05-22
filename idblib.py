@@ -69,7 +69,7 @@ except:
     def cmp(a, b): return (a > b) - (a < b)
 
 
-class cachedproperty:
+class cachedproperty(object):
     ## .. only works with python3 somehow. -- todo: figure out why not with python2
     def __init__(self, method):
         self.method = method
@@ -241,6 +241,15 @@ class IdaUnpacker:
             return val&0x3FFF
         else:
             return None
+
+    def next8(self):
+        if self.eof():
+            return None
+        byte = self.data[self.o:self.o+1]
+        self.o += 1
+        val, = struct.unpack("B", byte)
+
+        return val
 
     def next32(self):
         """
@@ -1619,4 +1628,26 @@ class Script:
     def language(self): return self._id0.string(self._nodeid, 'S', 1)
     @cachedproperty
     def body(self): return strz(self._id0.blob(self._nodeid, 'X'), 0)
+
+class Segment:
+    """
+    Decodes a value from "$ segs", see segment_t in segment.hpp for details.
+    """
+    def __init__(self, id0, spec):
+        self._id0 = id0
+        p = IdaUnpacker(id0.wordsize, spec)
+        self.startea = p.nextword()
+        self.size = p.nextword()
+        self.name_id = p.nextword()
+        self.class_id = p.nextword()
+        self.orgbase = p.nextword()
+        self.unknown = p.next16()
+        self.align = p.next8()
+        self.comb = p.next8()
+        self.perm = p.next8()
+        self.bitness = p.next8()
+        self.flags = p.next8()
+        self.selector = p.nextword()
+        self.defsr = [p.nextword() for _ in range(16)]
+        self.color = p.next32()
 
