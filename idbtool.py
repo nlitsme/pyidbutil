@@ -419,6 +419,9 @@ def id0query(args, id0, query):
 
 
 def getsegs(id0):
+    """
+    Returns a list of all segments.
+    """
     seglist = []
     node = id0.nodeByName('$ segs')
     if not node:
@@ -427,25 +430,46 @@ def getsegs(id0):
     endkey = id0.makekey(node, 'T')
     cur = id0.btree.find('ge', startkey)
     while cur.getkey() < endkey:
-        p = idblib.IdaUnpacker(id0.wordsize, cur.getval())
-        segstart = p.nextword()
-        segsize = p.nextword()
-
-        seglist.append((segstart, segsize))
+        s = idblib.Segment(id0, cur.getval())
+        seglist.append(s)
         cur.next()
 
     return seglist
 
 
-def classifynodes(args, id0, id1):
+def listsegments(id0):
+    """
+    Print a summary of all segments found in the IDB.
+    """
+    ssnode = id0.nodeByName('$ segstrings')
+    segstrings = id0.blob(ssnode, 'S')
+    p = idblib.IdaUnpacker(id0.wordsize, segstrings)
+    unk = p.next32()
+    nextid = p.next32()
+    slist = []
+    while not p.eof():
+        slen = p.next32()
+        if slen is None:
+            break
+        name = p.bytes(slen)
+        if name is None:
+            break
+        slist.append(name.decode('utf-8', 'ignore'))
+
+    segs = getsegs(id0)
+    for s in segs:
+        print("%08x - %08x  %s" % (s.startea, s.startea+s.size, slist[s.name_id-1]))
+
+def classifynodes(args, id0):
     """
     Attempt to classify all nodes in the IDA database.
 
     Note: this does not work for very old dbs
-
     """
     nodetype = {}
     tagstats = defaultdict(lambda : defaultdict(int))
+
+    segs = getsegs(id0)
 
     print("node: %x .. %x" % (id0.nodebase, id0.maxnode))
 
@@ -455,7 +479,7 @@ def classifynodes(args, id0, id1):
             return
         tag = k[2].decode('utf-8')
         if len(k)==3:
-            tagstats[nodetype][tag] += 1
+            tagstats[nodetype][(tag, )] += 1
         elif len(k)==4:
             value = k[3]
             if type(value)==int:
@@ -463,6 +487,10 @@ def classifynodes(args, id0, id1):
                     tagstats[nodetype][(tag, 'addr')] += 1
                 elif isnode(value):
                     tagstats[nodetype][(tag, 'node')] += 1
+                else:
+                    if value >= id0.maxnode:
+                        value -= pow(0x100, id0.wordsize)
+                    tagstats[nodetype][(tag, value)] += 1
             else:
                 tagstats[nodetype][(tag, 'string')] += 1
         else:
@@ -470,7 +498,9 @@ def classifynodes(args, id0, id1):
             return
 
     def isaddress(addr):
-        return id1.segStart(addr) is not None
+        for s in segs:
+            if s.startea <= addr < s.startea+s.size:
+                return True
 
     def isnode(addr):
         return id0.nodebase <= addr <= id0.maxnode
@@ -614,24 +644,26 @@ def classifynodes(args, id0, id1):
         if nodetype[node] == "unknown" and k[2] == b'N':
             name = cur.getval().rstrip(b'\x00')
             if re.match(br'\$ fr[0-9a-f]+\.\w+$', name):
-                name = b'fr-type-functionframe'
+                name = 'fr-type-functionframe'
             elif re.match(br'\$ fr[0-9a-f]+\. [rs]$', name):
-                name = b'fr-type-functionframe'
+                name = 'fr-type-functionframe'
             elif re.match(br'\$ F[0-9A-F]+\.\w+$', name):
-                name = b'F-type-functionframe'
+                name = 'F-type-functionframe'
             elif name.startswith(b'Stack of '):
-                name = b'stack-type-functionframe'
+                name = 'stack-type-functionframe'
             elif name.startswith(b'Stack['):
-                name = b'old-stack-type-functionframe'
+                name = 'old-stack-type-functionframe'
             elif name.startswith(b'xrefs to '):
-                name = b'old-xrefs'
+                name = 'old-xrefs'
+            else:
+                name = name.decode('utf-8', 'ignore')
             nodetype[node] = name
 
         cur.next()
 
     # output node classification
     if args.verbose:
-        for k, v in nodetype.items():
+        for k, v in sorted(nodetype.items(), key=lambda kv:kv[0]):
             print("%08x: %s" % (k, v))
 
     # summarize tags per nodetype
@@ -648,15 +680,15 @@ def classifynodes(args, id0, id1):
         cur.next()
 
     # output tag statistics
-    for nt, ntstats in tagstats.items():
+    for nt, ntstats in sorted(tagstats.items(), key=lambda kv:kv[0]):
         print("====== %s =====" % nt)
         for k, v in ntstats.items():
             if len(k)==1:
                 print("%5d - %s" % (v, k[0]))
             elif len(k)==2 and type(k[1])==type(1):
-                print("%5d - %s %08x" % (v, k[0], k[1]))
+                print("%5d - %s %8x" % (v, k[0], k[1]))
             elif type(k[1])==type(1):
-                print("%5d - %s %08x %s" % (v, k[0], k[1], k[2:]))
+                print("%5d - %s %8x %s" % (v, k[0], k[1], k[2:]))
             else:
                 print("%5d - %s %s %s" % (v, k[0], k[1], k[2:]))
 
@@ -748,7 +780,7 @@ def processidb(args, idb):
     if args.names:
         dumpnames(args, id0, nam)
     if args.classify:
-        classifynodes(args, id0, id1)
+        classifynodes(args, id0)
 
     if args.scripts:
         enumlist(id0, '$ scriptsnippets', dumpscript)
@@ -758,6 +790,8 @@ def processidb(args, idb):
         enumlist(id0, '$ enums', dumpenum)
     if args.imports:
         enumlist(id0, '$ imports', dumpimport)
+    if args.segs:
+        listsegments(id0)
 
 
 def processfile(args, filetypehint, fh):
@@ -911,6 +945,7 @@ Examples:
     # parser.add_argument('--comments', '-c', action='store_true', help='print comments')
     parser.add_argument('--enums', '-e', action='store_true', help='print enums and bitfields')
     parser.add_argument('--imports', action='store_true', help='print imports')
+    parser.add_argument('--segs', action='store_true', help='print segments')
     parser.add_argument('--info', '-i', action='store_true', help='database info')
     parser.add_argument('--inc', action='store_true', help='dump id0 records by cursor increment')
     parser.add_argument('--dec', action='store_true', help='dump id0 records by cursor decrement')
