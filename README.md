@@ -60,6 +60,8 @@ Usage:
  * `-id0`, `-id1` dump only one specific section.
  * `--i64`, `--i32` tell idbtool that the specified file is from a 64 or 32 bit database.
  * `--recover` group files from an unpacked database.
+ * `--classify` summarizes node usage in the database
+ * `--dump`  hexdump the original binary data
 
 query
 -----
@@ -143,6 +145,7 @@ TODO
 ====
 
  * add option to list all comments stored in the database
+ * add option to list flags for a list of addresses.
 
 Author
 ======
