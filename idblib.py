@@ -69,6 +69,23 @@ except:
     def cmp(a, b): return (a > b) - (a < b)
 
 
+class cachedproperty:
+    ## .. only works with python3 somehow. -- todo: figure out why not with python2
+    def __init__(self, method):
+        self.method = method
+        self.name = '_' + method.__name__
+    def __get__(self, obj, cls):
+        if not hasattr(obj, self.name):
+            value = self.method(obj)
+            setattr(obj, self.name, value)
+        else:
+            value = getattr(obj, self.name)
+        return value
+
+
+def strz(b, o):
+    return b[o:b.find(b'\x00', o)].decode('utf-8', 'ignore')
+
 def makeStringIO(data):
     if sys.version_info[0] == 2:
         from StringIO import StringIO
@@ -158,40 +175,122 @@ class FileSection(object):
         return self.curpos
 
 
-def idaunpack(buf):
+class IdaUnpacker:
     """
-    Special data packing format, used in struct definitions, and .id2 files
+    Decodes packed ida structures.
+    This is used o.a. in struct definitions, and .id2 files
 
-    sdk functions: pack_dd etc.
+    Related sdk functions: pack_dd, unpack_dd, etc.
     """
-    buf = bytearray(buf)
+    def __init__(self, wordsize, data):
+        self.wordsize = wordsize
+        self.data = data
+        self.o = 0
 
-    def nextval(o):
-        val = buf[o] ; o += 1
-        if val == 0xff:  # 32 bit value
-            val, = struct.unpack_from(">L", buf, o)
-            o += 4
-            return val, o
-        if val < 0x80:  # 7 bit value
-            return val, o
-        val <<= 8
-        val |= buf[o] ; o += 1
-        if val < 0xc000:  # 14 bit value
-            return val & 0x3fff, o
+    def eof(self):
+        return self.o >= len(self.data)
+    def have(self, n):
+        return self.o+n <= len(self.data)
 
-        # 29 bit value
-        val <<= 8
-        val |= buf[o] ; o += 1
-        val <<= 8
-        val |= buf[o] ; o += 1
-        return val & 0x1fffffff, o
+    def nextword(self):
+        """
+        Return a word-sized word from the buffer
+        """
+        if self.wordsize == 4:
+            return self.next32()
+        elif self.wordsize == 8:
+            return self.next64()
+        else:
+            raise Exception("unsupported wordsize")
 
-    values = []
-    o = 0
-    while o < len(buf):
-        val, o = nextval(o)
-        values.append(val)
-    return values
+    def next64(self):
+        if self.eof():
+            return None
+        lo = self.next32()
+        hi = self.next32()
+        return (hi<<32) | lo
+
+    def next16(self):
+        """
+        Return a packed 16 bit integer from the buffer
+        """
+        if self.eof():
+            return None
+        byte = self.data[self.o:self.o+1]
+        if byte == b'\xff':
+            # a 16 bit value:
+            # 1111 1111 xxxx xxxx xxxx xxxx 
+            if self.o+3 > len(self.data):
+                return None
+            val, = struct.unpack_from(">H", self.data, self.o+1)
+            self.o += 3
+            return val
+        elif byte < b'\x80':
+            # a 7 bit value:
+            # 0xxx xxxx
+            self.o += 1
+            val, = struct.unpack("B", byte)
+            return val
+        elif byte < b'\xc0':
+            # a 14 bit value:
+            # 10xx xxxx xxxx xxxx
+            if self.o+2 > len(self.data):
+                return None
+            val, = struct.unpack_from(">H", self.data, self.o)
+            self.o += 2
+            return val&0x3FFF
+        else:
+            return None
+
+    def next32(self):
+        """
+        Return a packed integer from the buffer
+        """
+        if self.eof():
+            return None
+        byte = self.data[self.o:self.o+1]
+        if byte == b'\xff':
+            # a 32 bit value:
+            # 1111 1111 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx
+            if self.o+5 > len(self.data):
+                return None
+            val, = struct.unpack_from(">L", self.data, self.o+1)
+            self.o += 5
+            return val
+        elif byte < b'\x80':
+            # a 7 bit value:
+            # 0xxx xxxx
+            self.o += 1
+            val, = struct.unpack("B", byte)
+            return val
+        elif byte < b'\xc0':
+            # a 14 bit value:
+            # 10xx xxxx xxxx xxxx
+            if self.o+2 > len(self.data):
+                return None
+            val, = struct.unpack_from(">H", self.data, self.o)
+            self.o += 2
+            return val&0x3FFF
+        elif byte < b'\xe0':
+            # a 29 bit value:
+            # 110x xxxx xxxx xxxx xxxx xxxx xxxx xxxx
+            if self.o+4 > len(self.data):
+                return None
+            val, = struct.unpack_from(">L", self.data, self.o)
+            self.o += 4
+            return val&0x1FFFFFFF
+        else:
+            return None
+
+    def bytes(self, n):
+        """
+        Return fixed length string from buffer
+        """
+        if not self.have(n):
+            return None
+        data = self.data[self.o : self.o+n]
+        self.o += n
+        return data
 
 
 class IDBFile(object):
@@ -833,6 +932,7 @@ class ID0File(object):
         self.btree = BTree(fh)
 
         self.wordsize = None
+        self.maxnode = None
 
         if idb.magic == 'IDA2':
             # .i64 files use 64 bit values for some things.
@@ -843,6 +943,7 @@ class ID0File(object):
             # determine wordsize from value of '$ MAX NODE'
             c = self.btree.find('eq', b'$ MAX NODE')
             if c and not c.eof():
+                self.maxnode = c.getval()
                 self.wordsize = len(c.getval())
 
         if self.wordsize not in (4, 8):
@@ -851,13 +952,39 @@ class ID0File(object):
 
         if self.wordsize == 4:
             self.nodebase = 0xFF000000
+            if not self.maxnode:
+                self.maxnode = self.nodebase + 0x0FFFFF
             self.fmt = "L"
         else:
             self.nodebase = 0xFF00000000000000
+            if not self.maxnode:
+                self.maxnode = self.nodebase + 0x0FFFFFFF
+
             self.fmt = "Q"
 
         # set the keyformat for this database
         self.keyfmt = ">s" + self.fmt + "s" + self.fmt
+
+    @cachedproperty
+    def root(self): return self.nodeByName("Root Node")
+
+    # note: versions before 4.7 used a short instead of a long
+    # and stored the versions with one minor digit ( 43 ) , instead of two ( 480 )
+    @cachedproperty
+    def idaver(self): return self.int(self.root, 'A', -1)
+
+    @cachedproperty
+    def idbparams(self): return self.bytes(self.root, 'S', 0x41b994)
+    @cachedproperty
+    def idaverstr(self): return self.string(self.root, 'S', 1303)
+    @cachedproperty
+    def nropens(self): return self.int(self.root, 'A', -4)
+    @cachedproperty
+    def creationtime(self): return self.int(self.root, 'A', -2)
+    @cachedproperty
+    def originmd5(self): return self.bytes(self.root, 'S', 1302)
+    @cachedproperty
+    def somecrc(self): return self.int(self.root, 'A', -5)
 
     def prettykey(self, key):
         """
@@ -922,9 +1049,18 @@ class ID0File(object):
         return b'N' + name.encode('utf-8')
 
     def makekey(self, *args):
-        """ return a binary key for the nodeid, tag and optional value """
+        """
+        Return a binary key for the nodeid, tag and optional value
+
+        makekey(node)
+        makekey(node, tag)
+        makekey(node, tag, stringvalue)
+        makekey(node, tag, intvalue)
+        """
         if len(args) > 1:
+            # utf-8 encode the tag
             args = args[:1] + (args[1].encode('utf-8'),) + args[2:]
+
         if len(args) == 3 and type(args[-1]) == str:
             # node.tag.string type keys
             return struct.pack(self.keyfmt[:1 + len(args)], b'.', *args[:-1]) + args[-1].encode('utf-8')
@@ -1122,6 +1258,8 @@ class ID1File(object):
 
     def getFlags(self, ea):
         seg = self.find_segment(ea)
+        if not seg:
+            return 0
         self.fh.seek(seg.offset + 4 * (ea - seg.startea))
         return struct.unpack("<L", self.fh.read(4))[0]
 
@@ -1138,10 +1276,14 @@ class ID1File(object):
 
     def segStart(self, ea):
         seg = self.find_segment(ea)
+        if not seg:
+            return
         return seg.startea
 
     def segEnd(self, ea):
         seg = self.find_segment(ea)
+        if not seg:
+            return
         return seg.endea
 
 
@@ -1224,3 +1366,257 @@ class ID2File(object):
 
     def __init__(self, idb, fh):
         pass
+
+
+class Struct:
+    """
+    Decodes info for structures
+
+    (structnode, N)          = structname
+    (structnode, D, address) = xref-type
+    (structnode, M, 0)       = packed struct info
+    (structnode, S, 27)      = packed value(addr, byte)
+    """
+    class Member:
+        """
+           (membernode, N)          = struct.member-name
+           (membernode, A, 3)       = structid+1
+           (membernode, A, 8)       = 
+           (membernode, A, 11)      = enumid+1
+           (membernode, A, 16)      = flag?  -- 4:variable length flag?
+           (membernode, S, 0x3000)  = type (set with 'Y')
+           (membernode, S, 0x3001)  = names used in 'type'
+           (membernode, S, 5)       = array type?
+           (membernode, S, 9)       = offset-type
+           (membernode, D, address) = xref-type
+           (membernode, d, structid) = xref-type   -- for sub-structs
+        """
+        def __init__(self, id0, spec):
+            self._id0 = id0
+            self._nodeid = spec.nextword() +  self._id0.nodebase
+            self.skip = spec.nextword()
+            self.size = spec.nextword()
+            self.flags = spec.next32()
+            self.props = spec.next32()
+            self.ofs = None
+        @cachedproperty
+        def name(self): return self._id0.name(self._nodeid)
+        @cachedproperty
+        def enumid(self): return self._id0.int(self._nodeid, 'A', 11)
+        @cachedproperty
+        def stringtype(self): return self._id0.int(self._nodeid, 'A', 16)
+        @cachedproperty
+        def structid(self): return self._id0.int(self._nodeid, 'A', 3)
+        @cachedproperty
+        def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+        @cachedproperty
+        def ptrinfo(self): return self._id0.bytes(self._nodeid, 'S', 9)
+        @cachedproperty
+        def typeinfo(self): return self._id0.bytes(self._nodeid, 'S', 0x3000)
+
+    def __init__(self, id0, nodeid):
+        self._id0 = id0
+        self._nodeid = nodeid
+
+        spec = self._id0.blob(self._nodeid, 'M')
+        p = IdaUnpacker(self._id0.wordsize, spec)
+        if self._id0.idaver >= 40:
+            #    1 = SF_VAR, 2 = SF_UNION, 4 = SF_HASHUNI, 8 = SF_NOLIST, 0x10 = SF_TYPLIB, 0x20 = SF_HIDDEN, 0x40 = SF_FRAME, 0xF80 = SF_ALIGN, 0x1000 = SF_GHOST
+            self.flags = p.next32()
+        else:
+            self.flags = 0
+
+        nmembers = p.next32()
+
+        self.members = []
+        o = 0
+        for i in range(nmembers):
+            m = Struct.Member(self._id0, p)
+            m.ofs = o
+            o += m.size
+
+            self.members.append(m)
+
+        self.extra = []
+        while not p.eof():
+            self.extra.append(p.next32())
+
+    @cachedproperty
+    def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+    @cachedproperty
+    def name(self): return self._id0.name(self._nodeid)
+
+    def __iter__(self):
+        for m in self.members:
+            yield m
+
+
+class Enum:
+    """
+       (enumnode, N)     = enum-name
+       (enumnode, A, -1) = nr of values
+       (enumnode, A, -3) = representation
+       (enumnode, A, -5) = flags: bitfield, hidden, ...
+       (enumnode, A, -8) = 
+       (enumnode, E, value) = valuenode + 1
+        
+    """
+    class Member:
+        """
+           (membernode, N)      = membername
+           (membernode, A, -2)  = enumnode + 1
+           (membernode, A, -3)  = member value
+        """
+        def __init__(self, id0, nodeid):
+            self._id0 = id0
+            self._nodeid = nodeid
+
+        @cachedproperty
+        def value(self): return self._id0.int(self._nodeid, 'A', -3)
+        @cachedproperty
+        def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+        @cachedproperty
+        def name(self): return self._id0.name(self._nodeid)
+
+    def __init__(self, id0, nodeid):
+        self._id0 = id0
+        self._nodeid = nodeid
+
+    @cachedproperty
+    def count(self): return self._id0.int(self._nodeid, 'A', -1)
+    @cachedproperty
+    def representation(self): return self._id0.int(self._nodeid, 'A', -3)
+
+    # flags>>3 -> width
+    # flags&1 -> bitfield
+    @cachedproperty
+    def flags(self): return self._id0.int(self._nodeid, 'A', -5)
+
+    @cachedproperty
+    def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+    @cachedproperty
+    def name(self): return self._id0.name(self._nodeid)
+
+    def __iter__(self):
+        startkey = self._id0.makekey(self._nodeid, 'E')
+        endkey = self._id0.makekey(self._nodeid, 'F')
+        cur = self._id0.btree.find('ge', startkey)
+        while cur.getkey() < endkey:
+            yield Enum.Member(self._id0, self._id0.int(cur) - 1)
+            cur.next()
+
+
+class Bitfield:
+    class Member:
+        def __init__(self, id0, nodeid):
+            self._id0 = id0
+            self._nodeid = nodeid
+
+        @cachedproperty
+        def value(self): return self._id0.int(self._nodeid, 'A', -3)
+        @cachedproperty
+        def mask(self): return self._id0.int(self._nodeid, 'A', -6) - 1
+        @cachedproperty
+        def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+        @cachedproperty
+        def name(self): return self._id0.name(self._nodeid)
+
+    class Mask:
+        def __init__(self, id0, nodeid, mask):
+            self._id0 = id0
+            self._nodeid = nodeid
+            self.mask = mask
+
+        @cachedproperty
+        def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+        @cachedproperty
+        def name(self): return self._id0.name(self._nodeid)
+
+        def __iter__(self):
+            """
+            Enumerates all Masks
+            """
+            startkey = self._id0.makekey(self._nodeid, 'E')
+            endkey = self._id0.makekey(self._nodeid, 'F')
+            cur = self._id0.btree.find('ge', startkey)
+            while cur.getkey() < endkey:
+                yield Bitfield.Member(self._id0, self._id0.int(cur) - 1)
+                cur.next()
+
+
+    def __init__(self, id0, nodeid):
+        self._id0 = id0
+        self._nodeid = nodeid
+
+    @cachedproperty
+    def count(self): return self._id0.int(self._nodeid, 'A', -1)
+    @cachedproperty
+    def representation(self): return self._id0.int(self._nodeid, 'A', -3)
+    @cachedproperty
+    def flags(self): return self._id0.int(self._nodeid, 'A', -5)
+
+    @cachedproperty
+    def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+    @cachedproperty
+    def name(self): return self._id0.name(self._nodeid)
+
+    def __iter__(self):
+        """
+        Enumerates all Masks
+        """
+        startkey = self._id0.makekey(self._nodeid, 'm')
+        endkey = self._id0.makekey(self._nodeid, 'n')
+        cur = self._id0.btree.find('ge', startkey)
+        while cur.getkey() < endkey:
+            key = self._id0.decodekey(cur.getkey())
+            yield Bitfield.Mask(self._id0, self._id0.int(cur) - 1, key[-1])
+            cur.next()
+
+class IDBParams:
+    def __init__(self, id0, data):
+        self._id0 = id0
+        magic, self.version,  = struct.unpack_from("<3sH", data, 0)
+        if self.version<700:
+            cpu, self.idpflags, self.demnames, self.filetype, self.coresize, self.corestart, self.ostype, self.apptype = struct.unpack_from("<8sBBH" + (id0.fmt * 2) + "HH", data, 5)
+            self.cpu = strz(cpu, 0)
+        else:
+            p = IdaUnpacker(id0.wordsize, data[5:])
+            cpulen = p.next32()
+            self.cpu = p.bytes(cpulen)
+            genflags = p.next32()
+            self.idpflags = p.next32()
+            self.demnames = 0
+            changecount = p.next32()
+            self.filetype = p.next32()
+            self.ostype = p.next32()
+            self.apptype = p.next32()
+            asmtype = p.next32()
+            specsegs = p.next32()
+            specsegs = p.next32()
+            aflags = p.next32()
+            aflags2 = p.next32()
+            base = p.nextword()
+            startss = p.nextword()
+            startcs = p.nextword()
+            startip = p.nextword()
+            startea = p.nextword()
+            startsp = p.nextword()
+            main = p.nextword()
+            minea = p.nextword()
+            maxea = p.nextword()
+
+            self.coresize = 0
+            self.corestart = 0
+
+class Script:
+    def __init__(self, id0, nodeid):
+        self._id0 = id0
+        self._nodeid = nodeid
+
+    @cachedproperty
+    def name(self): return self._id0.string(self._nodeid, 'S', 0)
+    @cachedproperty
+    def language(self): return self._id0.string(self._nodeid, 'S', 1)
+    @cachedproperty
+    def body(self): return strz(self._id0.blob(self._nodeid, 'X'), 0)
+
