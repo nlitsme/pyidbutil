@@ -4,6 +4,15 @@ without launching IDA.
 
 Copyright (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
 """
+
+# todo:
+#  '$ segs'
+#      S <segaddr> = packed(startea, size, ....)
+#  '$ srareas'
+#      a <addr>    = packed(startea, size, flag, flag)  -- includes functions
+#      b <addr>    = packed(startea, size, flag, flag)  -- segment
+#      c <addr>    = packed(startea, size, flag, flag)  -- same as 'b'
+#       
 from __future__ import division, print_function, absolute_import, unicode_literals
 import sys
 import os
@@ -18,6 +27,7 @@ import struct
 import binascii
 import argparse
 import itertools
+from collections import defaultdict
 
 import re
 
@@ -36,6 +46,10 @@ def timestring(t):
 def strz(b, o):
     return b[o:b.find(b'\x00', o)].decode('utf-8', 'ignore')
 
+def nonefmt(fmt, num):
+    if num is None:
+        return "-"
+    return fmt % num
 
 ######### license encoding ################
 
@@ -143,11 +157,6 @@ filetypelist = [
 
 def dumpinfo(id0):
     """ print various infos on the idb file """
-    def nonefmt(fmt, num):
-        if num is None:
-            return "-"
-        return fmt % num
-
     def ftstring(ft):
         if 0 < ft < len(filetypelist):
             return "%02x:%s" % (ft, filetypelist[ft])
@@ -174,29 +183,18 @@ def dumpinfo(id0):
     if ldr:
         print("loader: %s %s" % (id0.string(ldr, 'S', 0), id0.string(ldr, 'S', 1)))
 
-    root = id0.nodeByName("Root Node")
-    if not root:
+    if not id0.root:
         print("database has no RootNode")
         return
 
-    params = id0.bytes(root, 'S', 0x41b994)
-    if params:
-        magic, version, cpu, idpflags, demnames, filetype, coresize, corestart, ostype, apptype = struct.unpack_from("<3sH8sBBH" + (id0.fmt * 2) + "HH", params, 0)
-        cpu = strz(cpu, 0)
-        print("cpu: %s, version=%d, filetype=%s, ostype=%s, apptype=%s, core:%x, size:%x" % (cpu, version, ftstring(filetype), osstring(ostype), appstring(apptype), corestart, coresize))
+    if id0.idbparams:
+        params = idblib.IDBParams(id0, id0.idbparams)
+        print("cpu: %s, version=%d, filetype=%s, ostype=%s, apptype=%s, core:%x, size:%x" % (params.cpu, params.version, ftstring(params.filetype), osstring(params.ostype), appstring(params.apptype), params.corestart, params.coresize))
 
-    idaver = id0.int(root, 'A', -1)
-    # note: versions before 4.7 used a short instead of a long
-    # and stored the versions with one minor digit ( 43 ) , instead of two ( 480 )
-    idaver2 = id0.string(root, 'S', 1303)
-    print("idaver=%s: %s" % (nonefmt("%04d", idaver), idaver2))
+    print("idaver=%s: %s" % (nonefmt("%04d", id0.idaver), id0.idaverstr))
 
-    nopens = id0.int(root, 'A', -4)
-    ctime = id0.int(root, 'A', -2)
-    crc = id0.int(root, 'A', -5)
-    srcmd5 = id0.bytes(root, 'S', 1302)
-
-    print("nopens=%s, ctime=%s, crc=%s, md5=%s" % (nonefmt("%d", nopens), nonefmt("%08x", ctime), nonefmt("%08x", crc), hexdump(srcmd5) if srcmd5 else "-"))
+    srcmd5 = id0.originmd5
+    print("nopens=%s, ctime=%s, crc=%s, md5=%s" % (nonefmt("%d", id0.nropens), nonefmt("%08x", id0.creationtime), nonefmt("%08x", id0.somecrc), hexdump(srcmd5) if srcmd5 else "-"))
 
     dumpuser(id0)
 
@@ -208,38 +206,22 @@ def dumpnames(args, id0, nam):
 
 def dumpscript(id0, node):
     """ dump all stored scripts """
-    name = id0.string(node, 'S', 0)
-    lang = id0.string(node, 'S', 1)
-    body = id0.blob(node, 'X').rstrip(b'\x00').decode('utf-8')
+    s = idblib.Script(id0, node)
 
-    print("======= %s %s =======" % (lang, name))
-    print(body)
+    print("======= %s %s =======" % (s.language, s.name))
+    print(s.body)
 
 
-def dumpstructmember(id0, spec):
-    def i64(a, b): return a + (b << 32)
-    if id0.wordsize == 8:
-        f = i64(spec[0], spec[1]), i64(spec[2], spec[3]), i64(spec[4], spec[5]), spec[6], spec[7]
-    else:
-        f = spec
-    print("     %02x %02x %08x %02x: " % tuple(f[1:]), end="")
-
-    nodeid = f[0] + id0.nodebase
-    name = id0.name(nodeid)
-    enumid = id0.int(nodeid, 'A', 11)
-    struct = id0.int(nodeid, 'A', 3)
-    # TODO 'A', 16 - stringtype
-    # TODO 'S', 0 - member comment
-    # TODO 'S', 1 - repeatable member comment
-    ptrseg = hexdump(id0.bytes(nodeid, 'S', 9))
-    eltype = hexdump(id0.bytes(nodeid, 'S', 0x3000))
-
-    print("%-40s" % name, end="")
-    if enumid:
-        print(" enum %08x" % enumid, end="")
-    if struct:
-        print(" struct %08x" % struct, end="")
-    if ptrseg:
+def dumpstructmember(m):
+    """
+    Dump info for a struct member.
+    """
+    print("     %02x %02x %08x %02x: %-40s" % (m.skip, m.size, m.flags, m.props, m.name), end="")
+    if m.enumid:
+        print(" enum %08x" % m.enumid, end="")
+    if m.structid:
+        print(" struct %08x" % m.structid, end="")
+    if m.ptrinfo:
         # packed
         # note: 64bit nrs are stored low32, high32
         #  flags1, target, base, delta, flags2
@@ -249,69 +231,53 @@ def dumpstructmember(id0, spec):
         #   0x10 = targetaddr, 0x20 = baseaddr, 0x40 = delta, 0x80 = base is plainnum
         # flags2:
         #   1=image is off, 0x10 = subtract, 0x20 = signed operand
-        print(" ptr %s" % ptrseg, end="")
-    if eltype:
-        print(" type %s" % eltype, end="")
+        print(" ptr %s" % m.ptrinfo, end="")
+    if m.typeinfo:
+        print(" type %s" % m.typeinfo, end="")
     print()
 
 
 def dumpstruct(id0, node):
-    """ dump all info for the struct defined by `node` """
-    name = id0.name(node)
-    packed = id0.blob(node, 'M')
-    try:
-        spec = idblib.idaunpack(packed)
-    except IndexError:
-        print("struct '%s' has corrupted M (data) node: %s" % (name, binascii.b2a_hex(packed)))
-        return
-
-    # todo: old idb databases did not have a flags element., so len == 1 + entsize*spec[0]
-
-    entsize = 5 if id0.wordsize == 4 else 8
-
-    extra = ", 0x%x" % spec[-1] if len(spec) - entsize * spec[1] == 3 else ", -"
-    # note: 64bit nrs are stored low32, high32
-    print("struct %s, 0x%x%s" % (name, spec[0], extra))
-    #  spec[0] = flags
-    #    1 = SF_VAR, 2 = SF_UNION, 4 = SF_HASHUNI, 8 = SF_NOLIST, 0x10 = SF_TYPLIB, 0x20 = SF_HIDDEN, 0x40 = SF_FRAME, 0xF80 = SF_ALIGN, 0x1000 = SF_GHOST
-    #  spec[1] = # members
-
-    #  spec[-1] = seqnr
-    #
-    if len(spec) - entsize * spec[1] not in (2, 3):
-        print("expected struct spec : %d = %d" % (spec[1], (len(spec) - 2) // 5))
-    for i in range(spec[1]):
-        dumpstructmember(id0, spec[entsize * i + 2:entsize * (i + 1) + 2])
+    """
+    dump all info for the struct defined by `node`
+    """
+    s = idblib.Struct(id0, node)
 
 
-def dumpenummember(id0, node):
-    """ print information on a single enum member """
-    name = id0.name(node)
-    value = id0.int(node, 'A', -3)
-    # id0.int(node, 'A', -2)  -> points back to enum
+    print("struct %s, 0x%x" % (s.name, s.flags))
+    for m in s:
+        dumpstructmember(m)
 
-    if value is None:
-        value = 0
-    print("    %08x %s" % (value, name))
+def dumpbitmember(m):
+    print("        %08x %s" % (m.value or 0, m.name))
+def dumpmask(m):
+    print("    mask %08x %s" % (m.mask, m.name))
+    for m in m:
+        dumpbitmember(m)
+def dumpbitfield(id0, node):
+    b = idblib.Bitfield(id0, node)
+    print("bitfield %s, %s, %s, %s" % (b.name, nonefmt("0x%x", b.count), nonefmt("0x%x", b.representation), nonefmt("0x%x", b.flags)))
+    for m in b:
+        dumpmask(m)
 
+def dumpenummember(m):
+    """
+    Print information on a single enum member
+    """
+    print("    %08x %s" % (m.value or 0, m.name))
 
 def dumpenum(id0, node):
-    """ dump all info for the enum defined by `node` """
-    name = id0.name(node)
-    size = id0.int(node, 'A', -1) or 0    # empty enums do not have size
-    display = id0.int(node, 'A', -3)
-    flags = id0.int(node, 'A', -5)
-    # flags>>3 -> width
-    # flags&1 -> bitfield
-    print("enum %s, 0x%x, 0x%x, 0x%x" % (name, size, display, flags))
-    startkey = id0.makekey(node, 'E')
-    endkey = id0.makekey(node, 'F')
-    cur = id0.btree.find('ge', startkey)
-    while cur.getkey() < endkey:
-        dumpenummember(id0, id0.int(cur) - 1)
-        cur.next()
+    """
+    Dump all info for the enum defined by `node`
+    """
+    e = idblib.Enum(id0, node)
+    if e.flags and e.flags&1:
+        dumpbitfield(id0, node)
+        return
+    print("enum %s, %s, %s, %s" % (e.name, nonefmt("0x%x", e.count), nonefmt("0x%x", e.representation), nonefmt("0x%x", e.flags)))
 
-    # todo: handle bitfields (node, 'm', i)  -> list of masks -> list of values
+    for m in e:
+        dumpenummember(m)
 
 
 def dumpimport(id0, node):
@@ -324,20 +290,33 @@ def dumpimport(id0, node):
         cur.next()
 
 
-def dumplist(id0, listname, dumper):
+def enumlist(id0, listname, callback):
     """
     Lists are all stored in a similar way.
+
+    (listnode, 'N')           = listname
+    (listnode, 'A', -1)       = list size      <-- not for '$ scriptsnippets'
+    (listnode, 'A', seqnr)    = itemnode+1
+
+    (listnode, 'Y', itemnode) = seqnr          <-- only with '$ enums'
+
+    (listnode, 'Y', 0)        = list size      <-- only '$ scriptsnippets'
+    (listnode, 'Y', 1)        = ?              <-- only '$ scriptsnippets'
+
+    (listnode, 'S', seqnr)    = dllname        <-- only '$ imports'
+
     """
-    sroot = id0.nodeByName(listname)
-    if not sroot:
+    listnode = id0.nodeByName(listname)
+    if not listnode:
         return
 
-    # note: (node, 'A', -1) = list size
-    for i in itertools.count():
-        snode = id0.int(sroot, 'A', i)
-        if not snode:
-            break
-        dumper(id0, snode - 1)
+    startkey = id0.makekey(listnode, 'A')
+    endkey = id0.makekey(listnode, 'A', 0xFFFFFFFF)
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        item = id0.int(cur)
+        callback(id0, item - 1)
+        cur.next()
 
 
 def printent(args, id0, c):
@@ -387,7 +366,7 @@ def createkey(args, id0, base, tag, ix):
     return id0.makekey(*s)
 
 
-def enumeratecursor(id0, args, c, onerec):
+def enumeratecursor(args, c, onerec, callback):
     """
     Enumerate cursor in direction specified by `--dec` or `--inc`,
     taking into account the optional limit set by `--limit`
@@ -396,7 +375,7 @@ def enumeratecursor(id0, args, c, onerec):
     """
     limit = args.limit
     while c and not c.eof() and (limit is None or limit > 0):
-        printent(args, id0, c)
+        callback(c)
         if args.dec:
             c.prev()
         else:
@@ -436,10 +415,255 @@ def id0query(args, id0, query):
 
     c = id0.btree.find(op, createkey(args, id0, base, tag, ix))
 
-    enumeratecursor(id0, args, c, op=='eq')
+    enumeratecursor(args, c, op=='eq', lambda c:printent(args, id0, c))
+
+
+def getsegs(id0):
+    seglist = []
+    node = id0.nodeByName('$ segs')
+    if not node:
+        return
+    startkey = id0.makekey(node, 'S')
+    endkey = id0.makekey(node, 'T')
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        p = idblib.IdaUnpacker(id0.wordsize, cur.getval())
+        segstart = p.nextword()
+        segsize = p.nextword()
+
+        seglist.append((segstart, segsize))
+        cur.next()
+
+    return seglist
+
+
+def classifynodes(args, id0, id1):
+    """
+    Attempt to classify all nodes in the IDA database.
+
+    Note: this does not work for very old dbs
+
+    """
+    nodetype = {}
+    tagstats = defaultdict(lambda : defaultdict(int))
+
+    print("node: %x .. %x" % (id0.nodebase, id0.maxnode))
+
+    def addstat(nodetype, k):
+        if len(k)<3:
+            print("??? strange, expected longer key - %s" % k)
+            return
+        tag = k[2].decode('utf-8')
+        if len(k)==3:
+            tagstats[nodetype][tag] += 1
+        elif len(k)==4:
+            value = k[3]
+            if type(value)==int:
+                if isaddress(value):
+                    tagstats[nodetype][(tag, 'addr')] += 1
+                elif isnode(value):
+                    tagstats[nodetype][(tag, 'node')] += 1
+            else:
+                tagstats[nodetype][(tag, 'string')] += 1
+        else:
+            print("??? strange, expected shorter key - %s" % k)
+            return
+
+    def isaddress(addr):
+        return id1.segStart(addr) is not None
+
+    def isnode(addr):
+        return id0.nodebase <= addr <= id0.maxnode
+
+    def processbitfieldvalue(v):
+        nodetype[v._nodeid] = 'bitfieldvalue'
+
+    def processbitfieldmask(m):
+        nodetype[m._nodeid] = 'bitfieldmask'
+
+        for m in m:
+            processbitfieldvalue(m)
+
+    def processbitfield(id0, node):
+        nodetype[node] = 'bitfield'
+
+        b = idblib.Bitfield(id0, node)
+        for m in b:
+            processbitfieldmask(m)
+
+
+    def processenummember(m):
+        nodetype[m._nodeid] = 'enummember'
+
+    def processenums(id0, node):
+        nodetype[node] = 'enum'
+
+        e = idblib.Enum(id0, node)
+        if e.flags&1:
+            processbitfield(id0, node)
+            return
+
+        for m in e:
+            processenummember(m)
+
+    def processstructmember(m, typename):
+        nodetype[m._nodeid] = typename
+
+    def processstructs(id0, node, typename):
+        nodetype[node] = typename
+        s = idblib.Struct(id0, node)
+
+        for m in s:
+            processstructmember(m, typename+"member")
+
+    def processscripts(id0, node):
+        nodetype[node] = 'script'
+
+    def processaddr(id0, cur):
+        k = id0.decodekey(cur.getkey())
+        if len(k)==4 and k[2:4] == (b'A', 2):
+            nodetype[id0.int(cur)-1] = 'hexrays'
+
+        addstat('addr', k)
+
+    def processfunc(id0, funcspec):
+        p = idblib.IdaUnpacker(id0.wordsize, funcspec)
+
+        funcstart = p.nextword()
+        funcsize = p.nextword()
+        flags = p.next16()
+        if flags is None:
+            return
+        if flags&0x8000:   # is tail
+            return
+
+        node = p.nextword()
+
+        if node<0xFFFFFF and node!=0:
+            processstructs(id0, node + id0.nodebase, "frame")
+
+    def processimport(id0, node):
+        print("imp %08x" % node)
+        startkey = id0.makekey(node+1, 'A')
+        endkey = id0.makekey(node+1, 'B')
+        cur = id0.btree.find('ge', startkey)
+        while cur.getkey() < endkey:
+            dllnode = id0.int(cur)
+            nodetype[dllnode] = 'import'
+            cur.next()
+
+
+    # mark enums, structs, scripts.
+    enumlist(id0, '$ enums', processenums)
+    enumlist(id0, '$ structs', lambda id0, node : processstructs(id0, node, "struct"))
+    enumlist(id0, '$ scriptsnippets', processscripts)
+    enumlist(id0, '$ imports', processimport)
+
+    # enum functions, scan for stackframes
+    funcsnode = id0.nodeByName('$ funcs')
+    startkey = id0.makekey(funcsnode, 'S')
+    endkey = id0.makekey(funcsnode, 'T')
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        processfunc(id0, cur.getval())
+        cur.next()
+
+    clinode = id0.nodeByName('$ cli')
+    if clinode:
+        for letter in "ABCDEFGHIJKMcio":
+            startkey = id0.makekey(clinode, letter)
+            endkey = id0.makekey(clinode, chr(ord(letter)+1))
+            cur = id0.btree.find('ge', startkey)
+            while cur.getkey() < endkey:
+                nodetype[id0.int(cur)] = 'cli.'+letter
+                cur.next()
+
+
+    # enum addresses, scan for hex-rays nodes
+    startkey = b'.'
+    endkey = id0.makekey(id0.nodebase)
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        processaddr(id0, cur)
+        cur.next()
+
+    # addresses above node list
+    startkey = id0.makekey(id0.maxnode+1)
+    endkey = b'/'
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        processaddr(id0, cur)
+        cur.next()
+
+    # scan for unmarked nodes
+    #  $ fr[0-9a-f]+\.\w+
+    #  $ fr[0-9a-f]+\. [rs]
+    #  $ F[0-9A-F]+\.\w+
+    #  $ Stack of \w+
+    #  Stack[0000007C]
+    #  xrefs to \w+
+
+    startkey = id0.makekey(id0.nodebase)
+    endkey = id0.makekey(id0.maxnode+1)
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        k = id0.decodekey(cur.getkey())
+        node = k[1]
+        if node not in nodetype:
+            nodetype[node] = "unknown"
+        if nodetype[node] == "unknown" and k[2] == b'N':
+            name = cur.getval().rstrip(b'\x00')
+            if re.match(br'\$ fr[0-9a-f]+\.\w+$', name):
+                name = b'fr-type-functionframe'
+            elif re.match(br'\$ fr[0-9a-f]+\. [rs]$', name):
+                name = b'fr-type-functionframe'
+            elif re.match(br'\$ F[0-9A-F]+\.\w+$', name):
+                name = b'F-type-functionframe'
+            elif name.startswith(b'Stack of '):
+                name = b'stack-type-functionframe'
+            elif name.startswith(b'Stack['):
+                name = b'old-stack-type-functionframe'
+            elif name.startswith(b'xrefs to '):
+                name = b'old-xrefs'
+            nodetype[node] = name
+
+        cur.next()
+
+    # output node classification
+    if args.verbose:
+        for k, v in nodetype.items():
+            print("%08x: %s" % (k, v))
+
+    # summarize tags per nodetype
+    startkey = id0.makekey(id0.nodebase)
+    endkey = id0.makekey(id0.maxnode+1)
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        k = id0.decodekey(cur.getkey())
+        node = k[1]
+        nt = nodetype[node]
+
+        addstat(nt, k)
+
+        cur.next()
+
+    # output tag statistics
+    for nt, ntstats in tagstats.items():
+        print("====== %s =====" % nt)
+        for k, v in ntstats.items():
+            if len(k)==1:
+                print("%5d - %s" % (v, k[0]))
+            elif len(k)==2 and type(k[1])==type(1):
+                print("%5d - %s %08x" % (v, k[0], k[1]))
+            elif type(k[1])==type(1):
+                print("%5d - %s %08x %s" % (v, k[0], k[1], k[2:]))
+            else:
+                print("%5d - %s %s %s" % (v, k[0], k[1], k[2:]))
 
 
 def processid0(args, id0):
+    if args.info:
+        dumpinfo(id0)
 
     if args.pagedump:
         id0.btree.pagedump()
@@ -451,18 +675,39 @@ def processid0(args, id0):
         id0.btree.dump()
     elif args.inc:
         c = id0.btree.find('ge', b'')
-        enumeratecursor(id0, args, c, False)
+        enumeratecursor(args, c, False, lambda c:printent(args, id0, c))
     elif args.dec:
         c = id0.btree.find('le', b'\x80')
-        enumeratecursor(id0, args, c, False)
+        enumeratecursor(args, c, False, lambda c:printent(args, id0, c))
 
-    if args.info:
-        dumpinfo(id0)
 
 
 def processid1(args, id1):
     if args.id1:
         id1.dump()
+    elif args.dump:
+        m = re.match(r'^(\d\w*)-(\d\w*)?$', args.dump)
+        if not m:
+            raise Exception("--dump requires a byte range")
+        a = int(m.group(1), 0)
+        b = int(m.group(2), 0)
+        line = asc = ""
+        for ea in range(a, b):
+            if len(line)==0:
+                line = "%08x:" % ea
+            byte = id1.getFlags(ea)&0xFF
+            line += " %02x" % byte
+            asc += chr(byte) if 32<byte<127 else '.'
+
+            if len(line) == 9 + 3*16:
+                line += " " + asc
+                print(line)
+                line = asc = ""
+        if len(line):
+            while len(line) < 9 + 3*16:
+                line += "   "
+            line += " " + asc
+            print(line)
 
 
 def processid2(args, id2):
@@ -492,8 +737,9 @@ def processidb(args, idb):
 
     nam = idb.getsection(idblib.NAMFile)
     id0 = idb.getsection(idblib.ID0File)
+    id1 = idb.getsection(idblib.ID1File)
     processid0(args, id0)
-    processid1(args, idb.getsection(idblib.ID1File))
+    processid1(args, id1)
     processid2(args, idb.getsection(idblib.ID2File))
     processnam(args, nam)
     processtil(args, idb.getsection(idblib.TILFile))
@@ -501,15 +747,17 @@ def processidb(args, idb):
 
     if args.names:
         dumpnames(args, id0, nam)
+    if args.classify:
+        classifynodes(args, id0, id1)
 
     if args.scripts:
-        dumplist(id0, '$ scriptsnippets', dumpscript)
+        enumlist(id0, '$ scriptsnippets', dumpscript)
     if args.structs:
-        dumplist(id0, '$ structs', dumpstruct)
+        enumlist(id0, '$ structs', dumpstruct)
     if args.enums:
-        dumplist(id0, '$ enums', dumpenum)
+        enumlist(id0, '$ enums', dumpenum)
     if args.imports:
-        dumplist(id0, '$ imports', dumpimport)
+        enumlist(id0, '$ imports', dumpimport)
 
 
 def processfile(args, filetypehint, fh):
@@ -668,7 +916,9 @@ Examples:
     parser.add_argument('--dec', action='store_true', help='dump id0 records by cursor decrement')
     parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records, by walking the page tree')
     parser.add_argument('--id1', "-id1", action='store_true', help='dump id1 records')
+    parser.add_argument('--dump', type=str, help='hexdump id1 bytes', metavar='FROM-UNTIL')
     parser.add_argument('--pagedump', "-d", action='store_true', help='dump all btree pages, including any that might have become inaccessible due to datacorruption.')
+    parser.add_argument('--classify', action='store_true', help='Classify nodes found in the database.')
 
     parser.add_argument('--query', "-q", type=str, nargs='*', help='search the id0 file for a specific record.')
     parser.add_argument('--limit', '-m', type=int, help='Max nr of records to return for a query.')
