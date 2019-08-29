@@ -23,6 +23,11 @@ if sys.version_info[0] == 2:
     reload(sys)
     sys.setdefaultencoding('utf-8')
 
+if sys.version_info[0] == 2:
+    stdout = sys.stdout
+else:
+    stdout = sys.stdout.buffer
+
 import struct
 import binascii
 import argparse
@@ -713,33 +718,54 @@ def processid0(args, id0):
         enumeratecursor(args, c, False, lambda c:printent(args, id0, c))
 
 
+def hexascdumprange(id1, a, b):
+    line = asc = ""
+    for ea in range(a, b):
+        if len(line)==0:
+            line = "%08x:" % ea
+        byte = id1.getFlags(ea)&0xFF
+        line += " %02x" % byte
+        asc += chr(byte) if 32<byte<127 else '.'
+
+        if len(line) == 9 + 3*16:
+            line += " " + asc
+            print(line)
+            line = asc = ""
+    if len(line):
+        while len(line) < 9 + 3*16:
+            line += "   "
+        line += " " + asc
+        print(line)
+
+
+def saverange(id1, a, b, fh):
+    buf = bytes()
+    for ea in range(a, b):
+        byte = id1.getFlags(ea)&0xFF
+        buf += struct.pack("B", byte)
+
+        if len(buf) == 65536:
+            fh.write(buf)
+            buf = bytes()
+
+    if buf:
+        fh.write(buf)
+
 
 def processid1(args, id1):
     if args.id1:
         id1.dump()
-    elif args.dump:
-        m = re.match(r'^(\d\w*)-(\d\w*)?$', args.dump)
+    elif args.dump or args.dumpraw:
+        m = re.match(r'^(\d\w*)-(\d\w*)?$', args.dump or args.dumpraw)
         if not m:
             raise Exception("--dump requires a byte range")
         a = int(m.group(1), 0)
         b = int(m.group(2), 0)
-        line = asc = ""
-        for ea in range(a, b):
-            if len(line)==0:
-                line = "%08x:" % ea
-            byte = id1.getFlags(ea)&0xFF
-            line += " %02x" % byte
-            asc += chr(byte) if 32<byte<127 else '.'
 
-            if len(line) == 9 + 3*16:
-                line += " " + asc
-                print(line)
-                line = asc = ""
-        if len(line):
-            while len(line) < 9 + 3*16:
-                line += "   "
-            line += " " + asc
-            print(line)
+        if args.dumpraw:
+            saverange(id1, a, b, stdout)
+        else:
+            hexascdumprange(id1, a, b)
 
 
 def processid2(args, id2):
@@ -952,6 +978,7 @@ Examples:
     parser.add_argument('--id0', "-id0", action='store_true', help='dump id0 records, by walking the page tree')
     parser.add_argument('--id1', "-id1", action='store_true', help='dump id1 records')
     parser.add_argument('--dump', type=str, help='hexdump id1 bytes', metavar='FROM-UNTIL')
+    parser.add_argument('--dumpraw', type=str, help='output id1 bytes', metavar='FROM-UNTIL')
     parser.add_argument('--pagedump', "-d", action='store_true', help='dump all btree pages, including any that might have become inaccessible due to datacorruption.')
     parser.add_argument('--classify', action='store_true', help='Classify nodes found in the database.')
 
@@ -980,7 +1007,8 @@ Examples:
                     d = dbs.setdefault(basepath, dict())
                     d[ext.lower()] = fn
 
-            print("\n==> " + fn + " <==\n")
+            if not args.dumpraw:
+                print("\n==> " + fn + " <==\n")
 
             try:
                 filetype = args.filetype or filetype_from_name(fn)
