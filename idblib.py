@@ -124,7 +124,7 @@ class FileSection(object):
 
 
     This class is used to access a section (e.g. the .id0 file) of a larger file (e.g. the .idb file)
-    and make read/seek behave as if it were a seperate file.
+    and make read/seek behave as if it were a separate file.
     """
     def __init__(self, fh, start, end):
         self.fh = fh
