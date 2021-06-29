@@ -324,6 +324,61 @@ def enumlist(id0, listname, callback):
         cur.next()
 
 
+def listfuncdirs(id0):
+    listnode = id0.nodeByName('$ dirtree/funcs')
+    if not listnode:
+        return
+
+    dir_id = 0
+    while True:
+        start = dir_id * 0x10000
+        end = start + 0xFFFF
+        data = id0.blob(listnode, 'S', start, end)
+        if data == b'':
+            break
+        dumpfuncdir(id0, dir_id, data)
+        dir_id += 1
+
+
+def dumpfuncdir(id0, i, data):
+    terminate = data.find(b'\0', 1)
+    name = data[1:terminate].decode('utf-8')
+
+    p = idblib.IdaUnpacker(id0.wordsize, data[terminate+1:])
+    parent = p.nextword()
+    unk = p.next32()
+    subdir_count = p.next32()
+
+    subdirs = []
+    while subdir_count:
+        subdir_id = p.nextwordsigned()
+        if subdirs:
+            subdir_id = subdirs[-1] + subdir_id
+        subdirs.append(subdir_id)
+        subdir_count -= 1
+
+    func_count = p.next32()
+    funcs = []
+    while func_count:
+        func_id = p.nextwordsigned()
+        if funcs:
+            func_id = funcs[-1] + func_id
+        funcs.append(func_id)
+        func_count -= 1
+
+    if not p.eof():
+        raise Exception('not EOF after dir parsed')
+
+    print("dir %d = %s" % (i, name))
+    print("  parent = %d" % parent)
+    print("  subdirs:")
+    for subdir in subdirs:
+        print("    %d" % subdir)
+    print("  functions:")
+    for func in funcs:
+        print("    0x%x" % func)
+
+
 def printent(args, id0, c):
     if args.verbose:
         print("%s = %s" % (id0.prettykey(c.getkey()), id0.prettyval(c.getval())))
@@ -814,6 +869,8 @@ def processidb(args, idb):
         enumlist(id0, '$ structs', dumpstruct)
     if args.enums:
         enumlist(id0, '$ enums', dumpenum)
+    if args.funcdirs:
+        listfuncdirs(id0)
     if args.imports:
         enumlist(id0, '$ imports', dumpimport)
     if args.segs:
@@ -972,6 +1029,7 @@ Examples:
     parser.add_argument('--enums', '-e', action='store_true', help='print enums and bitfields')
     parser.add_argument('--imports', action='store_true', help='print imports')
     parser.add_argument('--segs', action='store_true', help='print segments')
+    parser.add_argument('--funcdirs', action='store_true', help='print function dirs (folders)')
     parser.add_argument('--info', '-i', action='store_true', help='database info')
     parser.add_argument('--inc', action='store_true', help='dump id0 records by cursor increment')
     parser.add_argument('--dec', action='store_true', help='dump id0 records by cursor decrement')

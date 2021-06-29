@@ -49,10 +49,10 @@ Usage:
  * `-n` or `--names`  will list all named values in the database.
  * `-s` or `--scripts` will list all scripts stored in the database.
  * `-u` or `--structs` will list all structs stored in the database.
- *         `--imports` will list all imported symbols from the database
  * `-e` or `--enums` will list all enums stored in the database.
+ * `--imports` will list all imported symbols from the database.
+ * `--funcdirs` will list function folders stored in the database.
  * `-i` or `--info` will print some general info about the database. 
-
  * `-d` or `--pagedump`  dump btree page tree contents.
  * `--inc`, `--dec` list all records in ascending / descending order.
  * `-q` or `--query` search specific records in the database.
