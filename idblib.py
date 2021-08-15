@@ -194,7 +194,7 @@ class IdaUnpacker:
 
     def nextword(self):
         """
-        Return a word-sized word from the buffer
+        Return an unsigned word-sized integer from the buffer
         """
         if self.wordsize == 4:
             return self.next32()
@@ -202,6 +202,24 @@ class IdaUnpacker:
             return self.next64()
         else:
             raise Exception("unsupported wordsize")
+
+    def nextwordsigned(self):
+        """
+        Return a signed word-sized integer from the buffer
+        """
+        if self.wordsize == 4:
+            val = self.next32()
+            if val < 0x80000000:
+                return val
+            return val - 0x100000000
+        elif self.wordsize == 8:
+            val = self.next64()
+            if val < 0x8000000000000000:
+                return val
+            return val - 0x10000000000000000
+        else:
+            raise Exception("unsupported wordsize")
+
 
     def next64(self):
         if self.eof():
