@@ -286,12 +286,28 @@ def dumpenum(id0, node):
 
 
 def dumpimport(id0, node):
-    startkey = id0.makekey(node, 'A')
-    endkey = id0.makekey(node, 'B')
+    # Note that '$ imports' is a list where the actual nodes
+    # are stored in the list, therefore we add '1' to the node here.
+
+    # first the named imports
+    startkey = id0.makekey(node+1, 'S')
+    endkey = id0.makekey(node+1, 'T')
     cur = id0.btree.find('ge', startkey)
     while cur.getkey() < endkey:
+        txt = id0.string(cur)
+        key = cur.getkey()
+        ea = id0.decodekey(key)[3]
+        print("%08x: %s" % (ea, txt))
+        cur.next()
+
+    # then list the imports by ordinal
+    startkey = id0.makekey(node+1, 'A')
+    endkey = id0.makekey(node+1, 'B')
+    cur = id0.btree.find('ge', startkey)
+    while cur.getkey() < endkey:
+        ordinal = id0.decodekey(cur.getkey())[3]
         ea = id0.int(cur)
-        print("%08x: %s" % (ea, id0.name(ea)))
+        print("%08x: (ord%04d) %s" % (ea, ordinal, id0.name(ea)))
         cur.next()
 
 
