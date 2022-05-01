@@ -363,24 +363,57 @@ def dumpfuncdir(id0, i, data):
     p = idblib.IdaUnpacker(id0.wordsize, data[terminate+1:])
     parent = p.nextword()
     unk = p.next32()
-    subdir_count = p.next32()
+    
+    if data[0] == 0:  # IDA 7.5
+        subdir_count = p.next32()
+        subdirs = []
+        while subdir_count:
+            subdir_id = p.nextwordsigned()
+            if subdirs:
+                subdir_id = subdirs[-1] + subdir_id
+            subdirs.append(subdir_id)
+            subdir_count -= 1
 
-    subdirs = []
-    while subdir_count:
-        subdir_id = p.nextwordsigned()
-        if subdirs:
-            subdir_id = subdirs[-1] + subdir_id
-        subdirs.append(subdir_id)
-        subdir_count -= 1
+        func_count = p.next32()
+        funcs = []
+        while func_count:
+            func_id = p.nextwordsigned()
+            if funcs:
+                func_id = funcs[-1] + func_id
+            funcs.append(func_id)
+            func_count -= 1
 
-    func_count = p.next32()
-    funcs = []
-    while func_count:
-        func_id = p.nextwordsigned()
-        if funcs:
-            func_id = funcs[-1] + func_id
-        funcs.append(func_id)
-        func_count -= 1
+    elif data[0] == 1:  # IDA 7.6
+        children_count = p.next32()
+        children = []
+        for i in range(children_count):
+            next_child = p.nextwordsigned()
+            if children:
+                next_child += children[-1]
+            children.append(next_child)
+
+        subdir_count = p.next32()
+        children_count -= subdir_count
+        childtype_counts = [subdir_count]
+        while children_count:
+            childtype_count = p.next32()
+            children_count -= childtype_count
+            childtype_counts.append(childtype_count)
+
+        subdirs = []
+        funcs = []
+        i = 0
+        parsing_subdirs = True  # switch back and forth
+        for childtype_count in childtype_counts:
+            for _ in range(childtype_count):
+                if parsing_subdirs:
+                    subdirs.append(children[i])
+                else:
+                    funcs.append(children[i])
+                i += 1
+            parsing_subdirs = not parsing_subdirs
+    else:
+        raise NotImplementedError('unsupported funcdir schema')
 
     if not p.eof():
         raise Exception('not EOF after dir parsed')
