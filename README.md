@@ -15,8 +15,8 @@ With idbtool you can search thousands of .idb files in seconds.
 
 More precisely: on my laptop it takes:
 
- *  1.5 seonds to extract 143 idc scripts from 119 idb and i64 files.
- *  3.8 seonds to print idb info for 441 files.
+ *  1.5 seconds to extract 143 idc scripts from 119 idb and i64 files.
+ *  3.8 seconds to print idb info for 441 files.
  *  5.6 seconds to extract 281 enums containing 4726 members from 35 files.
  * 67.8 seconds to extract 5942 structs containing 33672 members from 265 files.
 
