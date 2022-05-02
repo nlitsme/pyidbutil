@@ -356,7 +356,7 @@ def listfuncdirs(id0):
         dir_id += 1
 
 
-def dumpfuncdir(id0, i, data):
+def dumpfuncdir(id0, dir_index, data):
     terminate = data.find(b'\0', 1)
     name = data[1:terminate].decode('utf-8')
 
@@ -418,7 +418,7 @@ def dumpfuncdir(id0, i, data):
     if not p.eof():
         raise Exception('not EOF after dir parsed')
 
-    print("dir %d = %s" % (i, name))
+    print("dir %d = %s" % (dir_index, name))
     print("  parent = %d" % parent)
     print("  subdirs:")
     for subdir in subdirs:
