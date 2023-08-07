@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 Tool for querying information from Hexrays .idb and .i64 files
 without launching IDA.
@@ -80,29 +81,70 @@ def licensestring(lic):
     """ decode a license blob """
     if not lic:
         return
-    if len(lic) != 127:
-        print("unknown license format: %s" % hexdump(lic))
+    if len(lic) < 127:
+        print("too short license format: %s" % binascii.b2a_hex(lic))
         return
-    if struct.unpack_from("<L", lic, 106)[0]:
-        print("unknown license format: %s" % hexdump(lic))
+    elif len(lic) > 127 and sum(lic[127:]) != 0:
+        print("too long license format: %s" % binascii.b2a_hex(lic))
         return
 
-    # note: first 2 bytes probably a checksum
+    if struct.unpack_from("<L", lic, 106)[0]:
+        print("unknown license format: %s" % binascii.b2a_hex(lic))
+        return
+
+    # first 2 bytes probably a checksum
 
     licver, = struct.unpack_from("<H", lic, 2)
-    if licver == 0:
+    time, = struct.unpack_from("<L", lic, 4)
 
-        # todo: new 'Evaluation version'  has licver == 0 as well, but is new format anyway
+    # new 'Freeware version'  has licver == 0 as well, but is new format anyway, it is recognizable by time==0x10000
+    if licver == 0 and time != 0x10000:
+        if time:
+            """
+            # up to and including ida v5.2
 
-        # up to ida v5.2
-        time, = struct.unpack_from("<L", lic, 4)
-        # then 8 zero bytes
-        licflags, = struct.unpack_from("<L", lic, 16)
-        licensee = strz(lic, 20)
-        return "%s [%08x]  %s" % (timestring(time), licflags, licensee)
+            +00:  int16 checksum?
+            +02:  int16 zero
+            +04:  int32 unix timestamp
+            +08:  byte[8]  zero
+            +10:  int32 flags
+            +14:  char[107]  license text
+            """
+
+            licflags, = struct.unpack_from("<L", lic, 16)
+            licensee = strz(lic, 20)
+            return "%s [%08x]  %s" % (timestring(time), licflags, licensee)
+        else:
+            """
+            +00: byte[0x13]  zero
+            +13: int32 ?
+            +17: int32 timestamp
+            +1b: byte[8]  zero
+            +23: int32 flags
+            +27: char[88]  license text
+            """
+            unk, = struct.unpack_from("<L", lic, 0x13)
+            time, = struct.unpack_from("<L", lic, 0x17)
+            licflags, = struct.unpack_from("<L", lic, 0x23)
+            licensee = strz(lic, 0x27)
+
+            return "%s [%08x] (%08x)  %s" % (timestring(time), licflags, unk, licensee)
     else:
+        """
         # since ida v5.3
-        # licflags from 8 .. 16
+
+        +00: int16 checksum?
+        +02: int16 idaversion
+        +04: int32 ? small number, 1 or 2.
+        +08: int64 ? -1  or big number,  maybe license flags?
+        +10: int32 timestamp
+        +14: int32  zero
+        +18: int32  sometimes another timestamp
+        +1c: byte[6]  license id
+        +22: char[*] license text   ( v5.3-v5.x : 93 chars,  v6.0: 77 chars, v6.5: 69 chars )
+        +67: int64 ?  since ida v6.50
+        +6f: byte[16] hash   .. since ida v6.00
+        """
         time1, = struct.unpack_from("<L", lic, 16)
         time2, = struct.unpack_from("<L", lic, 16 + 8)
         licid = "%02X-%02X%02X-%02X%02X-%02X" % struct.unpack_from("6B", lic, 28)
@@ -551,6 +593,9 @@ def listsegments(id0):
     Print a summary of all segments found in the IDB.
     """
     ssnode = id0.nodeByName('$ segstrings')
+    if not ssnode:
+        print("can't find '$ segstrings' node")
+        return
     segstrings = id0.blob(ssnode, 'S')
     p = idblib.IdaUnpacker(id0.wordsize, segstrings)
     unk = p.next32()
