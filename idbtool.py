@@ -555,12 +555,12 @@ def id0query(args, id0, query):
 
     xlatop = {'=': 'eq', '==': 'eq', '>': 'gt', '<': 'lt', '>=': 'ge', '<=': 'le'}
 
-    SEP = ";"
-    m = re.match(r'^([=<>]=?)?(.+?)(?:' + SEP + '(\w+)(?:' + SEP + '(.+))?)?$', query)
+    SEP = r";"
+    m = re.match(r'^([=<>]=?)?(.+?)(?:' + SEP + r'(\w+)(?:' + SEP + r'(.+))?)?$', query)
     op = m.group(1) or "=="
     base = m.group(2)
-    tag = m.group(3)
-    ix = m.group(4)
+    tag = m.group(3)  # optional ;tag
+    ix = m.group(4)   # optional ;ix
 
     op = xlatop[op]
 
