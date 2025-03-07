@@ -157,12 +157,19 @@ def dumpuser(id0):
     orignode = id0.nodeByName('$ original user')
     if orignode:
         user0 = id0.bytes(orignode, 'S', 0)
-        if user0.find(b'\x00\x00\x00\x00') >= 128:
-            user0 = decryptuser(user0)
-        else:
-            user0 = user0[:127]
-        # user0 has 128 bytes rsa encrypted license, followed by 32 bytes zero
-        print("orig: %s" % licensestring(user0))
+        if user0:
+            if user0.find(b'\x00\x00\x00\x00') >= 128:
+                user0 = decryptuser(user0)
+            else:
+                user0 = user0[:127]
+            # user0 has 128 bytes rsa encrypted license, followed by 32 bytes zero
+            print("orig: %s" % licensestring(user0))
+        # ida9 has S10+S11 == license json
+        user10 = id0.blob(orignode, 'S', 16)
+        if user10:
+            import json
+            user10 = json.loads(user10)
+            print("orig: %s" % user10)
     curnode = id0.nodeByName('$ user1')
     if curnode:
         user1 = id0.bytes(curnode, 'S', 0)
