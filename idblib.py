@@ -364,10 +364,33 @@ class IDBFile(object):
                 checksums.append(idscheck)
 
                 # note: filever 4  has '0x5c', zeros, md5, more zeroes
-            else:
+            elif fileversion == 6:
                 values = struct.unpack_from("<QQLLHQQQ5LQL", hdrdata, 6)
                 offsets = [values[_] for _ in (0, 1, 5, 6, 7, 13)]
                 checksums = [values[_] for _ in (8, 9, 10, 11, 12, 14)]
+            elif fileversion == 910:
+                """
+                +00: "IDA2", 0, 0
+                +06: headersize
+                +0e: datastart
+                +16: aabbccdd00000000
+                +1e: version
+                +20: compression
+                +21: 6 qwords   section-size
+                +5d: md5
+                """
+                values = struct.unpack_from("<3QHB6Q", hdrdata, 6)
+                offsets = [values[1]]
+                self.sizes = values[5:]
+                
+                for s in self.sizes:
+                    offsets.append(offsets[-1]+s)
+                checksums = [0] * len(offsets)
+                self.compression = values[4]
+                if self.compression:
+                    raise Exception("compression not supported for v910")
+            else:
+                raise Exception("unknown file version")
 
         # offsets now has offsets to the various idb parts
         #  id0, id1, nam, seg, til, id2 ( = sparse file )
@@ -397,9 +420,15 @@ class IDBFile(object):
         if self.fileversion < 5:
             comp, size = struct.unpack("<BL", self.fh.read(5))
             ofs = self.offsets[i] + 5
-        else:
+        elif self.fileversion == 6:
             comp, size = struct.unpack("<BQ", self.fh.read(9))
             ofs = self.offsets[i] + 9
+        elif self.fileversion == 910:
+            comp = 0
+            size = self.sizes[i]
+            ofs = self.offsets[i]
+        else:
+            raise Exception("unhandled file version")
         return comp, ofs, size, self.checksums[i]
 
     def getpart(self, ix):
