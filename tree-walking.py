@@ -107,34 +107,34 @@ class BasePage(object):
         return self.index[ix].val
 
     def isleaf(self):
-        return self.preceeding is None
+        return self.preceding is None
 
     def isindex(self):
-        return self.preceeding is not None
+        return self.preceding is not None
 
     def __repr__(self):
-        return ("leaf" if self.isleaf() else ("index<%d>" % self.preceeding)) + repr(self.index)
+        return ("leaf" if self.isleaf() else ("index<%d>" % self.preceding)) + repr(self.index)
 
 
 class LeafPage(BasePage):
     """ a leaf page in the b-tree """
     def __init__(self, kv):
         super(self.__class__, self).__init__(kv)
-        self.preceeding = None
+        self.preceding = None
 
 
 class IndexPage(BasePage):
     """
     An index page in the b-tree.
-    This page has a preceeding page plus several key+subpage pairs.
+    This page has a preceding page plus several key+subpage pairs.
     For each key+subpage: all keys in the subpage are greater than the key
     """
-    def __init__(self, preceeding, kv):
+    def __init__(self, preceding, kv):
         super(self.__class__, self).__init__(kv)
-        self.preceeding = preceeding
+        self.preceding = preceding
 
     def getpage(self, ix):
-        return self.preceeding if ix < 0 else self.index[ix].val
+        return self.preceding if ix < 0 else self.index[ix].val
 
 
 class Cursor:
@@ -292,7 +292,7 @@ class Btree:
         print("  " * indent, page)
         if page.isindex():
             print("  " * indent, end="")
-            self.dumptree(page.preceeding, indent + 1)
+            self.dumptree(page.preceding, indent + 1)
             for p in range(len(page.index)):
                 print("  " * indent, end="")
                 self.dumptree(page.getpage(p), indent + 1)
