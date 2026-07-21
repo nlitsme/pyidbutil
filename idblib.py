@@ -597,12 +597,12 @@ class BTree(object):
         there are subclasses which specify the exact layout of the page header,
         and index / leaf entries.
 
-        Leaf pages don't have a 'preceeding' page pointer.
+        Leaf pages don't have a 'preceding' page pointer.
 
         """
         def __init__(self, data, entsize, entfmt):
-            self.preceeding, self.count = struct.unpack_from(entfmt, data)
-            if self.preceeding:
+            self.preceding, self.count = struct.unpack_from(entfmt, data)
+            if self.preceding:
                 entrytype = self.IndexEntry
             else:
                 entrytype = self.LeafEntry
@@ -641,7 +641,7 @@ class BTree(object):
 
         def getpage(self, ix):
             """ For Indexpages, returns the page ptr for the specified entry """
-            return self.preceeding if ix < 0 else self.index[ix].page
+            return self.preceding if ix < 0 else self.index[ix].page
 
         def getkey(self, ix):
             """ For all page types, returns the key for the specified entry """
@@ -653,14 +653,14 @@ class BTree(object):
 
         def isleaf(self):
             """ True when this is a Leaf Page """
-            return self.preceeding == 0
+            return self.preceding == 0
 
         def isindex(self):
             """ True when this is an Index Page """
-            return self.preceeding != 0
+            return self.preceding != 0
 
         def __repr__(self):
-            return ("leaf" if self.isleaf() else ("index<%d>" % self.preceeding)) + repr(self.index)
+            return ("leaf" if self.isleaf() else ("index<%d>" % self.preceding)) + repr(self.index)
 
     ######################################################
     # Page objects for the various versions of the database
@@ -905,7 +905,7 @@ class BTree(object):
         print("  " * indent, page)
         if page.isindex():
             print("  " * indent, end="")
-            self.dumpindented(page.preceeding, indent + 1)
+            self.dumpindented(page.preceding, indent + 1)
             for p in range(len(page.index)):
                 print("  " * indent, end="")
                 self.dumpindented(page.getpage(p), indent + 1)
@@ -916,11 +916,11 @@ class BTree(object):
         in sequential order
         """
         page = self.readpage(pn)
-        print("%06x: preceeding = %06x, reccount = %04x" % (pn, page.preceeding, page.count))
+        print("%06x: preceding = %06x, reccount = %04x" % (pn, page.preceding, page.count))
         for ent in page.index:
             print("    %s" % ent)
-        if page.preceeding:
-            self.dumptree(page.preceeding)
+        if page.preceding:
+            self.dumptree(page.preceding)
             for ent in page.index:
                 self.dumptree(ent.page)
 
@@ -945,7 +945,7 @@ class BTree(object):
                 else:
                     page = self.page(pagedata)
 
-                    print("%06x: preceeding = %06x, reccount = %04x" % (pn, page.preceeding, page.count))
+                    print("%06x: preceding = %06x, reccount = %04x" % (pn, page.preceding, page.count))
                     for ent in page.index:
                         print("    %s" % ent)
             except Exception as e:
