@@ -1,3 +1,4 @@
+# Write-support changes written by chatgpt GPT-6.
 """
 idblib - a module for reading hex-rays Interactive DisAssembler databases
 
@@ -343,8 +344,10 @@ class IDBFile(object):
     def __init__(self, fh):
         """ constructor takes a filehandle """
         self.fh = fh
+        self._payload = None
         self.fh.seek(0)
         hdrdata = self.fh.read(0x100)
+        self.headerdata = hdrdata
 
         self.magic = hdrdata[0:4].decode('utf-8', 'ignore')
         if self.magic not in ('IDA0', 'IDA1', 'IDA2'):
@@ -385,13 +388,13 @@ class IDBFile(object):
                 values = struct.unpack_from("<3QHB6Q", hdrdata, 6)
                 offsets = [values[1]]
                 self.sizes = values[5:]
+                self.dataoffset = values[1]
                 
-                for s in self.sizes:
-                    offsets.append(offsets[-1]+s)
+                for size in self.sizes[:-1]:
+                    offsets.append(offsets[-1] + size)
                 checksums = [0] * len(offsets)
                 self.compression = values[4]
-                if self.compression:
-                    raise Exception("compression not supported for v910")
+
             else:
                 raise Exception("unknown file version")
 
@@ -400,6 +403,21 @@ class IDBFile(object):
         self.offsets = offsets
         self.checksums = checksums
         self.fileversion = fileversion
+        # Opaque persistent value: its meaning is not decoded.
+        self.header_value = None
+        if fileversion in (6, 910):
+            value_offset = 0x6c if fileversion == 6 else 0x5d
+            self.header_value = hdrdata[value_offset:value_offset + 16]
+            if len(self.header_value) != 16:
+                raise ValueError('truncated opaque header value')
+        if fileversion == 910:
+            from idb910 import V910Payload
+            self._payload = V910Payload(self.fh, self.dataoffset, sum(self.sizes), self.compression)
+
+    def close(self):
+        """Release v910 temporary data; the caller owns the source handle."""
+        if self._payload is not None:
+            self._payload.close()
 
     def getsectioninfo(self, i):
         """
@@ -411,6 +429,10 @@ class IDBFile(object):
          * data size
          * data checksum
 
+        For v910, offsets are logical offsets in the decompressed stream
+        plus dataoffset, and compression/checksum are zero per section.
+        Use getstoredpart(), not self.fh, to read these section bytes.
+
         Sections are stored in a fixed order: id0, id1, nam, seg, til, id2
         """
         if not 0 <= i < len(self.offsets):
@@ -419,6 +441,12 @@ class IDBFile(object):
         if self.offsets[i] == 0:
             return 0, 0, 0, 0
 
+        if self.fileversion == 910 and self.sizes[i] == 0:
+            return 0, 0, 0, 0
+
+        if self.fileversion == 910:
+            return 0, self.offsets[i], self.sizes[i], 0
+
         self.fh.seek(self.offsets[i])
         if self.fileversion < 5:
             comp, size = struct.unpack("<BL", self.fh.read(5))
@@ -426,13 +454,23 @@ class IDBFile(object):
         elif self.fileversion == 6:
             comp, size = struct.unpack("<BQ", self.fh.read(9))
             ofs = self.offsets[i] + 9
-        elif self.fileversion == 910:
-            comp = 0
-            size = self.sizes[i]
-            ofs = self.offsets[i]
         else:
             raise Exception("unhandled file version")
         return comp, ofs, size, self.checksums[i]
+
+    def getstoredpart(self, ix):
+        """Return stored section bytes; v910 uses verified decompressed data.
+
+        The whole v910 compression layer and its trailing CRC are excluded.
+        Legacy section compression is retained by this method.
+        """
+        comp, ofs, size, checksum = self.getsectioninfo(ix)
+        if not ofs:
+            return None
+        if self.fileversion == 910:
+            start = ofs - self.dataoffset
+            return FileSection(self._payload.fh, start, start + size)
+        return FileSection(self.fh, ofs, ofs + size)
 
     def getpart(self, ix):
         """
@@ -441,12 +479,11 @@ class IDBFile(object):
         This method optionally decompresses the data found in the .idb file,
         and returns a file-like object, with seek, read, tell.
         """
-        if self.offsets[ix] == 0:
-            return
-
         comp, ofs, size, checksum = self.getsectioninfo(ix)
+        if not ofs:
+            return None
 
-        fh = FileSection(self.fh, ofs, ofs + size)
+        fh = self.getstoredpart(ix)
         if comp == 2:
             import zlib
             # very old databases used a different compression scheme:
@@ -463,7 +500,50 @@ class IDBFile(object):
         """
         Constructs an object for the specified section.
         """
-        return cls(self, self.getpart(cls.INDEX))
+        part = self.getpart(cls.INDEX)
+        return cls(self, part) if part is not None else None
+
+    @classmethod
+    def create(cls, fh, fileversion=6, magic='IDA2', header_template=b'', header_value=None):
+        """Create a Python 3.9+ writer; the caller owns the output handle."""
+        from idbwrite import IDBWriter
+        return IDBWriter(fh, fileversion, magic, header_template, header_value)
+
+
+def updateidb(fh, ofh, fileversion=6, compression=0):
+    """Rebuild ID0 and copy other sections into a version-6 container.
+
+    This changes storage format only, not the IDA database schema/version.
+    Source and output must be distinct, seekable binary files.
+    """
+    if fh is ofh:
+        raise ValueError('source and output must be distinct files')
+
+    try:
+        same_file = os.path.samestat(os.fstat(fh.fileno()), os.fstat(ofh.fileno()))
+    except (AttributeError, OSError):
+        same_file = False
+
+    if same_file:
+        raise ValueError('source and output refer to the same file')
+
+    src = IDBFile(fh)
+    try:
+        template = src.headerdata if src.fileversion == 6 else b''
+        with IDBFile.create(ofh, fileversion, src.magic, template, header_value=src.header_value) as dst:
+            srcid0 = src.getsection(ID0File)
+            if srcid0 is not None:
+                dstid0 = dst.allocatesection(ID0File, compression=compression)
+                cursor = srcid0.btree.find('ge', b'')
+                while not cursor.eof():
+                    dstid0.write(cursor.getkey(), cursor.getval())
+                    cursor.next()
+                dstid0.close()
+            for section_type in (ID1File, NAMFile, SEGFile, TILFile, ID2File):
+                dst.copysection(src, section_type)
+
+    finally:
+        src.close()
 
 
 class RecoverIDBFile:
@@ -837,6 +917,9 @@ class BTree(object):
         'lt'  -> last record with key < to key
         'gt'  -> first record with key > to key
         """
+
+        if self.reccount == 0:
+            return None if rel == 'eq' else BTree.Cursor(self, [])
 
         # descend tree to leaf nearest to the `key`
         page = self.readpage(self.firstindex)
