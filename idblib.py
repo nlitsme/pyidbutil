@@ -84,7 +84,10 @@ class cachedproperty(object):
 
 
 def strz(b, o):
-    return b[o:b.find(b'\x00', o)].decode('utf-8', 'ignore')
+    end = b.find(b'\x00', o)
+    if end == -1:
+        end = len(b)
+    return b[o:end].decode('utf-8', 'ignore')
 
 def makeStringIO(data):
     if sys.version_info[0] == 2:
@@ -1221,7 +1224,7 @@ class ID0File(object):
         endkey = self.makekey(nodeid, tag, end)
         cur = self.btree.find('ge', startkey)
         data = b''
-        while cur.getkey() <= endkey:
+        while not cur.eof() and cur.getkey() <= endkey:
             data += cur.getval()
             cur.next()
         return data
@@ -1376,6 +1379,7 @@ class NAMFile(object):
             raise Exception("unknown nam magic: %s" % hexdump(magic))
         if idb.magic == 'IDA2':
             nnames >>= 1
+        self.npages = npages
         self.wordsize = wordsize
         self.wordfmt = fmt
         self.nnames = nnames
@@ -1490,6 +1494,7 @@ class Struct:
         o = 0
         for i in range(nmembers):
             m = Struct.Member(self._id0, p)
+            o += m.skip
             m.ofs = o
             o += m.size
 
@@ -1497,10 +1502,13 @@ class Struct:
 
         self.extra = []
         while not p.eof():
-            self.extra.append(p.next32())
+            val = p.next32()
+            if val is None:
+                break
+            self.extra.append(val)
 
-    @cachedproperty
     def comment(self, repeatable): return self._id0.string(self._nodeid, 'S', 1 if repeatable else 0)
+
     @cachedproperty
     def name(self): return self._id0.name(self._nodeid)
 
@@ -1559,7 +1567,7 @@ class Enum:
         startkey = self._id0.makekey(self._nodeid, 'E')
         endkey = self._id0.makekey(self._nodeid, 'F')
         cur = self._id0.btree.find('ge', startkey)
-        while cur.getkey() < endkey:
+        while not cur.eof() and cur.getkey() < endkey:
             yield Enum.Member(self._id0, self._id0.int(cur) - 1)
             cur.next()
 
@@ -1597,7 +1605,7 @@ class Bitfield:
             startkey = self._id0.makekey(self._nodeid, 'E')
             endkey = self._id0.makekey(self._nodeid, 'F')
             cur = self._id0.btree.find('ge', startkey)
-            while cur.getkey() < endkey:
+            while not cur.eof() and cur.getkey() < endkey:
                 yield Bitfield.Member(self._id0, self._id0.int(cur) - 1)
                 cur.next()
 
@@ -1625,7 +1633,7 @@ class Bitfield:
         startkey = self._id0.makekey(self._nodeid, 'm')
         endkey = self._id0.makekey(self._nodeid, 'n')
         cur = self._id0.btree.find('ge', startkey)
-        while cur.getkey() < endkey:
+        while not cur.eof() and cur.getkey() < endkey:
             key = self._id0.decodekey(cur.getkey())
             yield Bitfield.Mask(self._id0, self._id0.int(cur) - 1, key[-1])
             cur.next()
