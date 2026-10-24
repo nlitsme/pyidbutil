@@ -37,6 +37,8 @@ def dump_packed(data, wordsize, pattern):
 
     while not p.eof():
         val = p.next32()
+        if val is None:
+            break
         print("%08x" % val, end=" ")
 
     print()
