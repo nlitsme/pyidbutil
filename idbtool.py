@@ -910,7 +910,7 @@ def saverange(id1, a, b, fh):
 
 def processid1(args, id1):
     if args.id1:
-        id1.dump()
+        id1.dump(args.verbose)
     elif args.dump or args.dumpraw:
         m = re.match(r'^(\d\w*)-(\d\w*)?$', args.dump or args.dumpraw)
         if not m:
