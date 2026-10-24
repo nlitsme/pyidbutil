@@ -1040,6 +1040,8 @@ class ID0File(object):
     @cachedproperty
     def originmd5(self): return self.bytes(self.root, 'S', 1302)
     @cachedproperty
+    def originsha256(self): return self.bytes(self.root, 'S', 1349)
+    @cachedproperty
     def somecrc(self): return self.int(self.root, 'A', -5)
 
     def prettykey(self, key):
@@ -1197,7 +1199,7 @@ class ID0File(object):
         """
         data = self.bytes(id, 'N')
         if not data:
-            print("%x has no name" % id)
+            #print("%x has no name" % id)
             return
         if data[:1] == b'\x00':
             nameid, = struct.unpack_from(">" + self.fmt, data, 1)
@@ -1292,11 +1294,11 @@ class ID1File(object):
         #  L -> starting at: seglistofs + nsegs*seginfosize  are all zero
         #  L -> starting at seglistofs .. nsegs*seginfosize every even word must be unique
 
-    def dump(self):
+    def dump(self, verbose=False):
         """ print first and last bits for each segment """
         for seg in self.seglist:
             print("==== %08x-%08x" % (seg.startea, seg.endea))
-            if seg.endea - seg.startea < 30:
+            if verbose or seg.endea - seg.startea < 30:
                 for ea in range(seg.startea, seg.endea):
                     print("    %08x: %08x" % (ea, self.getFlags(ea)))
             else:
