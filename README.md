@@ -1,3 +1,16 @@
+# reading and modifying IDA databases
+
+This repository contains tools for reading or writing databases from
+the IDA disassembler.
+
+* idbtool - inspect the innards of an ida database
+* idbdowngrade - convert an ida 9.x database to 8.x
+* idbanonymize - remove identifying information from a db
+
+note that the sections in this document about writing databases were written by chatgpt,
+and are a bit verbose.
+
+
 IDBTOOL
 =======
 
@@ -134,11 +147,6 @@ or use the `--recover` option to view them as a complete database together.
 
 `idbtool` can figure out the bitsize of the database from an `.id0` file, but not(yet) from the others.
 
-
-LIBRARY
-=======
-
-The file `idblib.py` contains a library.
 
 
 Writing and rewriting databases (Python 3.9+)
@@ -290,6 +298,12 @@ actual-byte packing. The user confirmed this packed rebuild opens successfully i
 Downgrade command: IDA 9.x to IDA 8.4
 ====================================
 
+WARNING: downgrade seems to work fine as far as i can tell, but no guarantees,
+there may be nescesary changes which I have missed.
+
+This tool downgrades a 9.x database such that it can be used with IDA 8.x.
+
+
 `idbdowngrade.py` implements the version-metadata transformation that worked
 on the supplied 8.4-to-9.x MBR database. It targets 8.4 and writes a version-6
 container using the working B-tree builder.
@@ -355,6 +369,9 @@ are copied unchanged, not silently discarded.
 
 Anonymizer command
 ==================
+
+This tool removes license information, and original file paths.
+
 
 ```sh
 python3 idbanonymize.py source.i64 anonymous.i64
