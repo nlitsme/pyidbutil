@@ -1731,7 +1731,7 @@ class IDBParams:
         else:
             p = IdaUnpacker(id0.wordsize, data[5:])
             cpulen = p.next32()
-            self.cpu = p.bytes(cpulen)
+            self.cpu = strz(p.bytes(cpulen))
             genflags = p.next32()
             self.idpflags = p.next32()
             self.demnames = 0
