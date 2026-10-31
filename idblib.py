@@ -374,7 +374,7 @@ class IDBFile(object):
                 values = struct.unpack_from("<QQLLHQQQ5LQL", hdrdata, 6)
                 offsets = [values[_] for _ in (0, 1, 5, 6, 7, 13)]
                 checksums = [values[_] for _ in (8, 9, 10, 11, 12, 14)]
-            elif fileversion == 910:
+            elif fileversion >= 910:
                 """
                 +00: "IDA2", 0, 0
                 +06: headersize
@@ -396,7 +396,7 @@ class IDBFile(object):
                 self.compression = values[4]
 
             else:
-                raise Exception("unknown file version")
+                raise Exception("unknown file version: %d" % fileversion)
 
         # offsets now has offsets to the various idb parts
         #  id0, id1, nam, seg, til, id2 ( = sparse file )
@@ -405,12 +405,12 @@ class IDBFile(object):
         self.fileversion = fileversion
         # Opaque persistent value: its meaning is not decoded.
         self.header_value = None
-        if fileversion in (6, 910):
+        if fileversion == 6 or fileversion >= 910:
             value_offset = 0x6c if fileversion == 6 else 0x5d
             self.header_value = hdrdata[value_offset:value_offset + 16]
             if len(self.header_value) != 16:
                 raise ValueError('truncated opaque header value')
-        if fileversion == 910:
+        if fileversion >= 910:
             from idb910 import V910Payload
             self._payload = V910Payload(self.fh, self.dataoffset, sum(self.sizes), self.compression)
 
@@ -441,10 +441,10 @@ class IDBFile(object):
         if self.offsets[i] == 0:
             return 0, 0, 0, 0
 
-        if self.fileversion == 910 and self.sizes[i] == 0:
+        if self.fileversion >= 910 and self.sizes[i] == 0:
             return 0, 0, 0, 0
 
-        if self.fileversion == 910:
+        if self.fileversion >= 910:
             return 0, self.offsets[i], self.sizes[i], 0
 
         self.fh.seek(self.offsets[i])
@@ -467,7 +467,7 @@ class IDBFile(object):
         comp, ofs, size, checksum = self.getsectioninfo(ix)
         if not ofs:
             return None
-        if self.fileversion == 910:
+        if self.fileversion >= 910:
             start = ofs - self.dataoffset
             return FileSection(self._payload.fh, start, start + size)
         return FileSection(self.fh, ofs, ofs + size)
@@ -1731,7 +1731,7 @@ class IDBParams:
         else:
             p = IdaUnpacker(id0.wordsize, data[5:])
             cpulen = p.next32()
-            self.cpu = strz(p.bytes(cpulen))
+            self.cpu = strz(p.bytes(cpulen), 0)
             genflags = p.next32()
             self.idpflags = p.next32()
             self.demnames = 0
