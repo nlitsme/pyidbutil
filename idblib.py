@@ -355,6 +355,7 @@ class IDBFile(object):
 
         values = struct.unpack_from("<6LH6L", hdrdata, 6)
         if values[5] != 0xaabbccdd:
+            # very old files
             fileversion = 0
             offsets = list(values[0:5])
             offsets.append(0)
@@ -370,7 +371,7 @@ class IDBFile(object):
                 checksums.append(idscheck)
 
                 # note: filever 4  has '0x5c', zeros, md5, more zeroes
-            elif fileversion == 6:
+            elif fileversion in (5, 6):
                 values = struct.unpack_from("<QQLLHQQQ5LQL", hdrdata, 6)
                 offsets = [values[_] for _ in (0, 1, 5, 6, 7, 13)]
                 checksums = [values[_] for _ in (8, 9, 10, 11, 12, 14)]
@@ -451,7 +452,7 @@ class IDBFile(object):
         if self.fileversion < 5:
             comp, size = struct.unpack("<BL", self.fh.read(5))
             ofs = self.offsets[i] + 5
-        elif self.fileversion == 6:
+        elif self.fileversion in (5, 6):
             comp, size = struct.unpack("<BQ", self.fh.read(9))
             ofs = self.offsets[i] + 9
         else:
@@ -1018,6 +1019,7 @@ class BTree(object):
         """
         self.fh.seek(self.pagesize)
         pn = 1
+        haveerror = False
         while True:
             try:
                 pagedata = self.fh.read(self.pagesize)
@@ -1036,7 +1038,10 @@ class BTree(object):
                         print("    %s" % ent)
             except Exception as e:
                 print("%06x: ERROR decoding as B-tree page: %s" % (pn, e))
+                haveerror = True
             pn += 1
+
+        return not haveerror
 
 
 class ID0File(object):
