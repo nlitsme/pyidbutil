@@ -1010,10 +1010,13 @@ def processfile(args, filetypehint, fh):
         elif magic.find(b'B-tree v') > 0:
             processid0(args, idblib.ID0File(DummyIDB(args), fh))
 
+        return True
+
     except Exception as e:
         print("ERROR %s" % e)
         if args.debug:
             raise
+        return False
 
 
 def recover_database(args, basepath, dbfiles):
@@ -1026,6 +1029,7 @@ def DirEnumerator(args, path):
     optionally recursing into subdirectories,
     or ignoring links.
     """
+    haveerror = False
     for d in os.scandir(path):
         try:
             if d.name == '.' or d.name == '..':
@@ -1039,13 +1043,16 @@ def DirEnumerator(args, path):
                     yield f
         except Exception as e:
             print("EXCEPTION %s accessing %s/%s" % (e, path, d.name))
+            haveerror = True
 
+    return not haveerror
 
 def EnumeratePaths(args, paths):
     """
     Enumerate all paths, files from the commandline
     optionally recursing into subdirectories.
     """
+    haveerror = False
     for fn in paths:
         try:
             # 3 - for ftp://, 4 for http://, 5 for https://
@@ -1060,7 +1067,9 @@ def EnumeratePaths(args, paths):
                 yield fn
         except Exception as e:
             print("EXCEPTION %s accessing %s" % (e, fn))
+            haveerror = True
 
+    return not haveerror
 
 def filetype_from_name(fn):
     i = max(fn.rfind('.'), fn.rfind('/'))
@@ -1151,6 +1160,8 @@ Examples:
 
     args = parser.parse_args()
 
+    haveerror = False
+
     if args.FILES:
         dbs = dict()
 
@@ -1172,11 +1183,13 @@ Examples:
             try:
                 filetype = args.filetype or filetype_from_name(fn)
                 with open(fn, "rb") as fh:
-                    processfile(args, filetype, fh)
+                    if not processfile(args, filetype, fh):
+                        haveerror = True
             except Exception as e:
                 print("ERROR: %s" % e)
                 if args.debug:
                     raise
+                haveerror = True
 
         if args.recover:
             for basepath, dbfiles in dbs.items():
@@ -1186,10 +1199,13 @@ Examples:
                         recover_database(args, basepath, dbfiles)
                     except Exception as e:
                         print("ERROR: %s" % e)
+                    haveerror = True
     else:
         print("==> STDIN <==")
-        processfile(args, args.filetype, sys.stdin.buffer)
+        if not processfile(args, args.filetype, sys.stdin.buffer):
+            haveerror = True
 
+    return 1 if haveerror else 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
