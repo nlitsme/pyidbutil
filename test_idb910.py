@@ -9,7 +9,7 @@ from unittest.mock import patch
 import zlib
 
 import idblib
-from idb910 import V910Payload
+from idb910 import V910Payload, V910Writer
 
 try:
     from compression import zstd
@@ -46,8 +46,9 @@ class V910Tests(unittest.TestCase):
     def fixture(self) -> Fixture:
         return Fixture((b'first', b'next' * 100, b'', b'', b'til', b'id2'))
 
-    def assert_sections(self, fixture: Fixture, compression: int) -> None:
-        source = fixture.container(compression)
+    def assert_sections(self, fixture: Fixture, compression: int,
+                        encoded: Optional[bytes] = None) -> None:
+        source = fixture.container(compression, encoded=encoded)
         db = idblib.IDBFile(source)
         try:
             for index, section in enumerate(fixture.sections):
@@ -173,3 +174,69 @@ class V910Tests(unittest.TestCase):
                              fixture.sections[0])
         finally:
             db.close()
+
+    @staticmethod
+    def _frame_sizes(body: bytes) -> list[int]:
+        """Decompressed size of each concatenated zstd frame in *body*."""
+        from compression.zstd import ZstdDecompressor
+        sizes = []
+        pos = 0
+        while pos < len(body):
+            decoder = ZstdDecompressor()
+            sizes.append(len(decoder.decompress(body[pos:])))
+            pos += len(body) - pos - len(decoder.unused_data)
+        return sizes
+
+    @unittest.skipIf(zstd is None, 'requires compression.zstd/backports.zstd')
+    def test_v910_writer_roundtrip(self) -> None:
+        fixture = self.fixture()
+        sections = b''.join(fixture.sections)
+        output = BytesIO()
+        V910Writer.build(BytesIO(sections), output, 3)
+        # Small stream: one frame whose tail is the CRC of the sections.
+        # (Not byte-identical to a one-shot zstd.compress: chunked
+        # compress/flush emits a different frame-header FCS encoding.)
+        stream = sections + struct.pack('<L', zlib.crc32(sections) & 0xffffffff)
+        self.assertEqual(self._frame_sizes(output.getvalue()), [len(stream)])
+        from compression.zstd import ZstdDecompressor
+        decoder = ZstdDecompressor()
+        self.assertEqual(decoder.decompress(output.getvalue()), stream)
+        source = fixture.container(3, output.getvalue())
+        db = idblib.IDBFile(source)
+        try:
+            for index, section in enumerate(fixture.sections):
+                part = db.getpart(index)
+                if section:
+                    self.assertEqual(part.read(), section)
+                else:
+                    self.assertIsNone(part)
+            self.assertEqual(db._payload.crc, zlib.crc32(sections))
+        finally:
+            db.close()
+
+    @unittest.skipIf(zstd is None, 'requires compression.zstd/backports.zstd')
+    def test_v910_writer_multi_frame(self) -> None:
+        # More than two 32 MiB chunks: one zstd frame per 32 MiB of
+        # decompressed data; the final frame carries the CRC tail.
+        frame = V910Writer.FRAME_SIZE
+        fixture = Fixture((b'z' * (2 * frame + 12345), b'id1',
+                           b'', b'', b'', b''))
+        sections = b''.join(fixture.sections)
+        output = BytesIO()
+        V910Writer.build(BytesIO(sections), output, 3)
+        self.assertEqual(self._frame_sizes(output.getvalue()),
+                         [frame, frame, len(sections) + 4 - 2 * frame])
+        self.assert_sections(fixture, 3, output.getvalue())
+
+    @unittest.skipIf(zstd is None, 'requires compression.zstd/backports.zstd')
+    def test_v910_writer_exact_frame_boundary(self) -> None:
+        # Input size exactly a frame boundary: the CRC still forms its
+        # own final frame.
+        frame = V910Writer.FRAME_SIZE
+        fixture = Fixture((b'a' * frame, b'', b'', b'', b'', b''))
+        sections = b''.join(fixture.sections)
+        output = BytesIO()
+        V910Writer.build(BytesIO(sections), output, 3)
+        self.assertEqual(self._frame_sizes(output.getvalue()),
+                         [frame, 4])
+        self.assert_sections(fixture, 3, output.getvalue())

@@ -34,6 +34,8 @@ import binascii
 import argparse
 import itertools
 from collections import defaultdict
+import tempfile
+import os.path
 
 import re
 
@@ -41,6 +43,9 @@ from datetime import datetime
 
 import idblib
 from idblib import hexdump
+from idbwrite import ID0Writer, IDBWriter
+import idbwrite
+from idb910 import V910Writer
 
 
 def timestring(t):
@@ -978,6 +983,168 @@ def processidb(args, idb):
         listsegments(id0)
 
 
+def _read_source_identity(srcid0):
+    """Read the identity-layer records (Root Node + $ loader name node)
+    from the ID0 btree of a healthy database.
+
+    Returns (root_nid, loader_nid, {key_bytes: value_bytes}).
+    """
+    fmt = '>' + srcid0.fmt
+    ws = srcid0.wordsize
+    recs = {}
+    ids = {}
+    for name in ('Root Node', '$ loader name'):
+        nid = srcid0.nodeByName(name)
+        if not nid:
+            raise ValueError('source database has no %r node' % name)
+        ids[name] = nid
+        prefix = b'.' + struct.pack(fmt, nid)
+        cur = srcid0.btree.find('ge', prefix)
+        while cur and not cur.eof() and cur.getkey()[:1] == b'.' \
+                and cur.getkey()[1:1 + ws] == prefix[1:]:
+            recs[cur.getkey()] = cur.getval()
+            cur.next()
+    return ids['Root Node'], ids['$ loader name'], recs
+
+
+def do_repair(damaged_path, output_path, source_path=None):
+    """Repair a damaged v950 database by rebuilding its identity layer.
+
+    The identity records come from a healthy v950 database of the same
+    architecture and file format (source_path, via --dump92).  Its
+    Root Node and $ loader name node records replace the damaged
+    ones; the original-file records (V path, S;1302 md5, S;1349 sha256)
+    are dropped because they describe the source binary, not the
+    damaged one.  The loader node of the damaged database (raw-binary
+    pattern, N record only) is replaced by the identical source
+    records.  All other node records and name mappings are kept,
+    sections 1..5 are copied verbatim.  The source and damaged files
+    are never modified.
+    """
+    if source_path is None:
+        raise ValueError('--repair requires an identity source '
+                         'database (--dump92)')
+    if not os.path.exists(source_path):
+        raise ValueError('identity source %s not found' % source_path)
+
+    with open(source_path, 'rb') as sfh:
+        src = idblib.IDBFile(sfh)
+        if src.fileversion != 950:
+            raise ValueError('source %s is v%d, expected v950'
+                             % (source_path, src.fileversion))
+        srcid0 = src.getsection(idblib.ID0File)
+        if srcid0 is None:
+            raise ValueError('source %s has no ID0 section' % source_path)
+        src_root, src_loader, srcrecs = _read_source_identity(srcid0)
+        src.close()
+
+    with open(damaged_path, 'rb') as fh:
+        damaged = idblib.IDBFile(fh)
+        id0 = damaged.getsection(idblib.ID0File)
+        if id0 is None:
+            raise ValueError('damaged database has no ID0 section')
+
+        fmt = '>' + id0.fmt
+        ws = id0.wordsize
+        root_id = id0.nodebase + 0x2
+        loader_id = id0.nodebase + 0x50
+        if src_root != root_id:
+            raise ValueError('source Root Node is 0x%x, expected 0x2'
+                             % (src_root - id0.nodebase))
+
+        def key_nodeid(key):
+            if key[:1] != b'.' or len(key) < 1 + ws:
+                return None
+            return struct.unpack(fmt, key[1:1 + ws])[0]
+
+        def remap(key, old, new):
+            if key_nodeid(key) != old:
+                return key
+            d = id0.decodekey(key)
+            tag = d[2]
+            if isinstance(tag, bytes):
+                tag = tag.decode('utf-8')
+            return id0.makekey(new, tag, d[3]) if len(d) == 4 \
+                else id0.makekey(new, tag)
+
+        # Keep everything except the damaged identity layer: node
+        # records under Root and the loader node, and the (lost)
+        # 'Root Node' name mapping.  The '$ loader name' mapping is
+        # intact in the damaged database and is kept as-is.
+        records = {}
+        dropped = 0
+        cursor = id0.btree.find('ge', b'')
+        if cursor:
+            while not cursor.eof():
+                key = cursor.getkey()
+                if key_nodeid(key) in (root_id, loader_id) or \
+                        key == b'NRoot Node':
+                    dropped += 1
+                    cursor.next()
+                    continue
+                records[key] = cursor.getval()
+                cursor.next()
+
+        # Add the healthy records, dropping the original-file records
+        # that describe the source binary.
+        added = 0
+        for key, value in srcrecs.items():
+            d = id0.decodekey(key)
+            if len(d) == 3 and d[2] in (b'V', 'V'):
+                continue
+            if len(d) == 4 and d[2] in (b'S', 'S') and d[3] in (1302, 1349):
+                continue
+            key = remap(key, src_loader, loader_id)
+            records[key] = value
+            added += 1
+
+        # Name mapping for the Root Node (value is the little-endian
+        # absolute nodeid).
+        records[b'NRoot Node'] = struct.pack('<' + id0.fmt, root_id)
+
+        # Pin the Root Node version fields to 9.5, whatever the source
+        # database's content version was (e.g. a 9.3 DB in a 9.5
+        # container).
+        records[id0.makekey(root_id, 'A', -1)] = struct.pack(
+            '<' + id0.fmt, 950)
+        records[id0.makekey(root_id, 'S', 1303)] = b'9.5\x00'
+
+        items = sorted(records.items())
+
+        with open(output_path, 'wb') as out:
+            writer = idbwrite.IDBWriter(out, fileversion=950,
+                                        magic=damaged.magic,
+                                        header_value=damaged.header_value)
+
+            id0_writer = writer.allocatesection(idblib.ID0File,
+                                                compression=3, pagesize=8192)
+            for key, value in items:
+                id0_writer.write(key, value)
+            id0_writer.close()
+
+            for index in range(1, 6):
+                cls = (idblib.ID1File, idblib.NAMFile, idblib.SEGFile,
+                       idblib.TILFile, idblib.ID2File)[index - 1]
+                part = damaged.getstoredpart(index)
+                if part is None:
+                    continue
+                section_writer = writer.allocatesection(cls, compression=3)
+                while True:
+                    chunk = part.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    section_writer.write(chunk)
+                section_writer.close()
+
+            writer.close()
+
+        damaged.close()
+
+    print("Repaired %s -> %s (source %s; records: %d kept, %d dropped, "
+          "%d added)" % (damaged_path, output_path, source_path,
+                        len(records), dropped, added))
+
+
 def processfile(args, filetypehint, fh):
     class DummyIDB:
         def __init__(idb, args):
@@ -1155,12 +1322,31 @@ Examples:
 
     parser.add_argument('--recover', action='store_true', help='recover idb from unpacked files, of v2 database')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--repair', action='store_true', help='repair identity layer of damaged v950 database')
+    parser.add_argument('--output', '-o', type=str, default=None, help='output file path for --repair')
+    parser.add_argument('--dump92', type=str, default=None,
+                        help='path to a healthy v950 database of the same '
+                        'architecture; identity source for --repair '
+                        '(required with --repair)')
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files')
 
     args = parser.parse_args()
 
     haveerror = False
+    if args.repair:
+        if not args.FILES:
+            parser.error("--repair requires a file argument")
+        if not args.output:
+            parser.error("--repair requires --output")
+        if not args.dump92:
+            parser.error("--repair requires --dump92 (identity source "
+                         "database)")
+        input_path = args.FILES[0]
+        output_path = args.output
+        dump_path = args.dump92
+        do_repair(input_path, output_path, dump_path)
+        return
 
     if args.FILES:
         dbs = dict()

@@ -12,6 +12,14 @@ import zlib
 import idblib
 from idbwrite import Record
 
+try:
+    from compression import zstd
+except ImportError:
+    try:
+        from backports import zstd
+    except ImportError:
+        zstd = None
+
 
 class WriterTests(unittest.TestCase):
     @staticmethod
@@ -323,4 +331,66 @@ class WriterTests(unittest.TestCase):
             self.assertEqual(cursor.getkey(), record.key)
             self.assertEqual(cursor.getval(), record.value)
             cursor.prev()
+        self.assertTrue(cursor.eof())
+
+    @unittest.skipIf(zstd is None, 'requires compression.zstd/backports.zstd')
+    def test_v950_header_layout(self) -> None:
+        # Layout verified byte-for-byte against original IDA 9.1/9.5 files.
+        header_value = bytes(range(16))
+        output = BytesIO()
+        writer = idblib.IDBFile.create(output, fileversion=950, magic='IDA2',
+                                       header_value=header_value)
+        try:
+            section = writer.allocatesection(idblib.ID0File, compression=3, pagesize=512)
+            section.write(b'testkey', b'val')
+            section.close()
+            writer.close()
+        except BaseException:
+            writer.abort()
+            raise
+        contents = output.getvalue()
+        header = contents[:0x6d]
+        self.assertEqual(header[:6], b'IDA2\x00\x00')
+        self.assertEqual(struct.unpack_from('<Q', header, 0x6)[0], 0x6d)   # headersize
+        self.assertEqual(struct.unpack_from('<Q', header, 0xe)[0], 0xed)   # datastart
+        self.assertEqual(struct.unpack_from('<Q', header, 0x16)[0],
+                         0xaabbccdd00000000)
+        self.assertEqual(struct.unpack_from('<H', header, 0x1e)[0], 950)
+        self.assertEqual(header[0x20], 3)  # zstd
+        sizes = struct.unpack_from('<6Q', header, 0x21)
+        self.assertGreater(sizes[0], 0)  # ID0 has data
+        self.assertEqual(sizes[1:], (0, 0, 0, 0, 0))
+        self.assertEqual(header[0x51:0x5d], bytes(12))  # zeroed gap
+        self.assertEqual(header[0x5d:0x6d], header_value)
+        # The reader round-trips version, compression and the opaque value.
+        db = idblib.IDBFile(BytesIO(contents))
+        try:
+            self.assertEqual(db.fileversion, 950)
+            self.assertEqual(db.compression, 3)
+            self.assertEqual(db.header_value, header_value)
+        finally:
+            db.close()
+
+    @unittest.skipIf(zstd is None, 'requires compression.zstd/backports.zstd')
+    def test_v950_roundtrip(self) -> None:
+        output = BytesIO()
+        writer = idblib.IDBFile.create(output, fileversion=950, magic='IDA2')
+        try:
+            section = writer.allocatesection(idblib.ID0File, compression=3, pagesize=128)
+            for i in range(20):
+                section.write(i.to_bytes(4, 'big'), b'v950')
+            section.close()
+            writer.close()
+        except BaseException:
+            writer.abort()
+            raise
+        # Read back and verify
+        result = idblib.IDBFile(output)
+        tree = result.getsection(idblib.ID0File).btree
+        cursor = tree.find('ge', b'')
+        for i in range(20):
+            key = i.to_bytes(4, 'big')
+            self.assertEqual(cursor.getkey(), key)
+            self.assertEqual(cursor.getval(), b'v950')
+            cursor.next()
         self.assertTrue(cursor.eof())
