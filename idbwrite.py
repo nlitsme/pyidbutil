@@ -9,6 +9,8 @@ from types import TracebackType
 from typing import BinaryIO, Optional, Protocol, Type, Union
 import zlib
 
+from idb910 import V910Writer
+
 
 class SectionType(Protocol):
     INDEX: int
@@ -272,15 +274,30 @@ class ID0Writer(SectionBuffer):
 
 
 class IDBWriter:
-    """Write a version-6 container to a seekable binary output file.
+    """Write a version-6 or version-950 container to a seekable binary output file.
+
+    Version-6: each section is individually zlib-compressed with 9-byte metadata.
+    Version-950: all sections are combined into a single zstd-compressed payload;
+    header is 0x6d bytes, section sizes stored at +0x21, CRC32 trailing the payload.
 
     Caller owns the output handle. Sections use temporary files, not RAM.
     close() requires all allocated sections to have been closed explicitly.
     """
 
-    def __init__(self, fh: BinaryIO, fileversion: int = 6, magic: str = 'IDA2', header_template: bytes = b'', header_value: Optional[bytes] = None):
-        if fileversion != 6:
-            raise ValueError('only container version 6 can be written')
+    # Header layouts
+    _V6_HEADERSIZE = 0xfc
+    _V950_HEADERSIZE = 0x6d
+    _V950_DATASTART = 0xed
+    _V950_COMPRESSION = 3  # zstd
+
+    # Section size array offset in v950 header
+    _V950_SIZES_OFFSET = 0x21
+
+    def __init__(self, fh: BinaryIO, fileversion: int = 6, magic: str = 'IDA2',
+                 header_template: bytes = b'', header_value: Optional[bytes] = None,
+                 pagesize: int = 8192):
+        if fileversion not in (6, 950):
+            raise ValueError('only container versions 6 and 950 can be written')
         if magic not in ('IDA1', 'IDA2'):
             raise ValueError('output magic must be IDA1 or IDA2')
         self.fh = fh
@@ -288,23 +305,39 @@ class IDBWriter:
         self.fileversion = fileversion
         self.closed = False
         self.sections: list[Optional[SectionBuffer]] = [None] * 6
-        self.header = bytearray(0xfc)
-        if header_template:
-            if len(header_template) < 0xfc:
-                raise ValueError('version-6 header template is truncated')
-            self.header[:] = header_template[:0xfc]
-        else:
-            struct.pack_into('<L', self.header, 0x58, 0x7c)
-        if header_value is not None:
-            if not isinstance(header_value, bytes) or len(header_value) != 16:
-                raise ValueError('opaque header value must be 16 bytes')
-            self.header[0x6c:0x7c] = header_value
+        self.pagesize = pagesize
+
+        if fileversion == 6:
+            self.header = bytearray(0xfc)
+            self.headersize = self._V6_HEADERSIZE
+            if header_template:
+                if len(header_template) < 0xfc:
+                    raise ValueError('version-6 header template is truncated')
+                self.header[:] = header_template[:0xfc]
+            else:
+                struct.pack_into('<L', self.header, 0x58, 0x7c)
+            if header_value is not None:
+                if not isinstance(header_value, bytes) or len(header_value) != 16:
+                    raise ValueError('opaque header value must be 16 bytes')
+                self.header[0x6c:0x7c] = header_value
+        else:  # fileversion == 950
+            # Fields are filled in _finish_v950; only the opaque 16-byte
+            # header value (0x5d-0x6c) is preserved from the source here.
+            self.header = bytearray(self._V950_HEADERSIZE)
+            if header_value is not None:
+                if not isinstance(header_value, bytes) or len(header_value) != 16:
+                    raise ValueError('opaque header value must be 16 bytes')
+                self.header[0x5d:0x6d] = header_value
 
     def allocatesection(self, cls: Type[SectionType], compression: int = 0, pagesize: int = 8192) -> Union[ID0Writer, SectionWriter]:
         index = cls.INDEX
         self._available(index)
-        if compression not in (0, 2):
-            raise ValueError('compression must be 0 or 2')
+        if self.fileversion == 6:
+            if compression not in (0, 2):
+                raise ValueError('compression must be 0 or 2')
+        else:  # fileversion == 950
+            if compression != 3:
+                raise ValueError('v950 requires zstd compression (3)')
         section: Union[ID0Writer, SectionWriter]
         if index == 0:
             section = ID0Writer(self, index, compression, pagesize)
@@ -384,6 +417,12 @@ class IDBWriter:
     def _finish(self) -> None:
         self.fh.seek(0)
         self.fh.truncate(0)
+        if self.fileversion == 950:
+            self._finish_v950()
+        else:
+            self._finish_v6()
+
+    def _finish_v6(self) -> None:
         write_exact(self.fh, bytes(len(self.header)))
         offsets: list[int] = [0] * 6
         checksums: list[int] = [0] * 6
@@ -396,6 +435,58 @@ class IDBWriter:
         write_exact(self.fh, bytes(self.header))
         self.fh.flush()
         self.fh.seek(0, 2)
+
+    def _finish_v950(self) -> None:
+        """
+        Write the v950 container header (0x6d bytes), then the payload.
+
+        Layout (verified byte-for-byte against original IDA 9.1/9.5 files):
+          bytes  0-5:   magic ('IDA1'/'IDA2') + 2 zero bytes
+          bytes  6-13:  headersize (Q) = 0x6d
+          bytes 14-21:  datastart (Q) = 0xed
+          bytes 22-29:  0xaabbccdd00000000
+                        (low 32 = 0; high 32 is the v910+ detection marker)
+          bytes 30-31:  version (H)
+          byte   32:    compression (B) = 3 (zstd)
+          bytes 33-80:  six section sizes (6Q)
+          bytes 81-92:  zeroed
+          bytes 93-108: opaque 16-byte header value (preserved from source)
+
+        The struct '<3QHB6Q' spans bytes 6..80; the rest is filled above.
+        """
+        section_sizes: list[int] = [0] * 6
+        for index, section in enumerate(self.sections):
+            if section is not None:
+                section.fh.seek(0, 2)
+                section_sizes[index] = section.fh.tell()
+
+        self.header[:6] = self.magic.encode('ascii') + b'\0\0'
+        struct.pack_into('<3QHB6Q', self.header, 6, self._V950_HEADERSIZE,
+                         self._V950_DATASTART, 0xaabbccdd00000000,
+                         self.fileversion, self._V950_COMPRESSION,
+                         *section_sizes)
+        write_exact(self.fh, bytes(self.header))
+
+        # The payload starts at datastart (0xed); the gap between the 0x6d
+        # header and 0xed is zero padding.
+        self.fh.seek(self._V950_DATASTART)
+
+        # Combine all section data into a temporary file
+        combined_fh = tempfile.TemporaryFile()
+        try:
+            for index, section in enumerate(self.sections):
+                if section is not None:
+                    section.fh.seek(0)
+                    while True:
+                        data = section.fh.read(1024 * 1024)
+                        if not data:
+                            break
+                        combined_fh.write(data)
+
+            # Write zstd-compressed combined payload + CRC trailer
+            V910Writer.build(combined_fh, self.fh, self._V950_COMPRESSION)
+        finally:
+            combined_fh.close()
 
     def abort(self) -> None:
         for section in self.sections:

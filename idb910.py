@@ -95,3 +95,65 @@ class V910Payload:
 
     def close(self) -> None:
         self.fh.close()
+
+
+class V910Writer:
+    """Emit the v910/v950 combined payload: concatenated zstd frames.
+
+    Mirrors IDA's on-disk layout: the decompressed stream is the section
+    bytes followed by a 4-byte little-endian CRC32 of all preceding bytes,
+    split into 32 MiB chunks, each compressed by a fresh compressor into
+    its own zstd frame.
+    """
+
+    CHUNK = 1024 * 1024
+    FRAME_SIZE = 0x2000000  # 32 MiB of decompressed data per frame
+
+    @staticmethod
+    def build(input_fh: BinaryIO, output: BinaryIO, compression: int = 3) -> None:
+        """Compress *input_fh* (raw concatenated section bytes) to *output*.
+
+        The CRC32 over the section bytes is appended to the decompressed
+        stream (i.e. compressed inside the final frame), matching IDA.
+        """
+        if compression != 3:
+            raise ValueError('v910/v950 writer requires zstd compression (3)')
+
+        try:
+            from compression.zstd import ZstdCompressor
+        except ImportError:
+            try:
+                from backports.zstd import ZstdCompressor
+            except ImportError as exc:
+                raise ImportError('v910 zstd requires Python 3.14+ or backports.zstd') from exc
+
+        input_fh.seek(0)
+        crc = 0
+        framed = 0  # decompressed bytes fed to the current frame
+        compressor = None
+
+        def close_frame() -> None:
+            nonlocal framed, compressor
+            if compressor is not None:
+                output.write(compressor.flush())
+                framed = 0
+                compressor = None
+
+        while True:
+            data = input_fh.read(V910Writer.CHUNK)
+            if data:
+                crc = zlib.crc32(data, crc)
+                if compressor is None:
+                    compressor = ZstdCompressor()
+                output.write(compressor.compress(data))
+                framed += len(data)
+                if framed >= V910Writer.FRAME_SIZE:
+                    close_frame()
+            else:
+                # input exhausted: the CRC belongs to the stream, so feed
+                # it to the final frame before flushing
+                if compressor is None:
+                    compressor = ZstdCompressor()
+                output.write(compressor.compress(struct.pack('<L', crc & 0xffffffff)))
+                close_frame()
+                return
