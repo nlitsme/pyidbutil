@@ -75,6 +75,7 @@ Usage:
  * `--recover` group files from an unpacked database.
  * `--classify` summarizes node usage in the database
  * `--dump`  hexdump the original binary data
+  * `--repair` repair the identity layer of a damaged v950 database (see below)
 
 query
 -----
@@ -263,6 +264,27 @@ The user confirmed a rebuilt MBR candidate opens in IDA 8.4. Broader native
 validation and real compressed-v910 sample validation remain outstanding.
 
 Run the unit tests with `python3 -m unittest discover -v`.
+
+```sh
+python3 idbtool.py --repair damaged.i64 -o repaired.i64 --dump92 healthy.i64
+```
+
+A 9.5 database can lose its identity layer - the Root Node records and its
+name mapping - after which IDA refuses to open the file even though the rest
+of the database is intact. The command rebuilds that layer from a healthy
+v950 database of the same architecture and file format (`--dump92`, required):
+the source's Root Node and `$ loader name` records replace the damaged ones,
+while the source's own original-file records (the `V` path, and the input
+MD5/SHA-256) are left out, since they describe the source binary rather than
+the damaged one. The Root Node version fields are pinned to 9.5 regardless of
+the source database's content version.
+
+Every other record and the remaining sections are copied unchanged, the
+opaque 16-byte container-header value is preserved, and both input files are
+never modified. The output uses the version-950 container format (zstd
+combined payload), so a Python with the `compression.zstd` module is
+required to run it. A rebuilt database opens in IDA with the source
+database's processor, endianness and file format.
 
 
 Opaque header value
